@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Wx Router</title>
+  <meta name="theme-color" content="#0b3d5c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>Wx Router</h1>
+    <span id="vesselBadge" class="badge"></span>
+    <nav>
+      <button id="tabRoute" class="tab active" data-view="routeView">Route</button>
+      <button id="tabSettings" class="tab" data-view="settingsView">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Main screen -->
+    <section id="routeView" class="view active">
+      <div id="map"></div>
+      <div id="pickHint" class="pick-hint" hidden></div>
+      <div class="sheet">
+        <div class="row">
+          <label>Start</label>
+          <div class="field-text" id="startText">Not set</div>
+          <div class="btns">
+            <button id="btnLocate" class="btn">My location</button>
+            <button id="btnPickStart" class="btn">Pick on chart</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Destination</label>
+          <div class="field-text" id="destText">Not set</div>
+          <div class="btns">
+            <button id="btnPickDest" class="btn">Pick on chart</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="departAt">Departure</label>
+          <input type="datetime-local" id="departAt">
+        </div>
+        <button id="btnPlan" class="btn primary wide">Plan route</button>
+        <div id="progress" class="progress" hidden></div>
+        <div id="result"></div>
+      </div>
+    </section>
+
+    <!-- Settings screen -->
+    <section id="settingsView" class="view">
+      <form id="settingsForm" class="settings" autocomplete="off">
+        <h2>Vessel</h2>
+        <div class="grid2">
+          <label>Vessel name<input name="name" type="text" placeholder="e.g. Sea Breeze"></label>
+          <label>Length (ft)<input name="lengthFt" type="number" step="0.1" min="0" inputmode="decimal"></label>
+          <label>Freeboard (ft)<input name="freeboardFt" type="number" step="0.1" min="0" inputmode="decimal"></label>
+          <label>Draft (ft)<input name="draftFt" type="number" step="0.1" min="0" inputmode="decimal"></label>
+          <label>Cruise speed (kt)<input name="speedKt" type="number" step="0.1" min="1" inputmode="decimal" required></label>
+        </div>
+
+        <h2>Maximum seas allowed (ft)</h2>
+        <p class="note">Seas are measured by where they hit the boat relative to the bow. Port and starboard use the same limit.</p>
+        <div class="limits">
+          <svg id="limitsDiagram" viewBox="-110 -110 220 220" aria-label="Sea limit sectors around the vessel"></svg>
+          <div id="limitInputs" class="limit-inputs"></div>
+        </div>
+
+        <h2>Weather data</h2>
+        <label>Forecast source
+          <select name="provider" id="providerSelect"></select>
+        </label>
+        <p class="note">The forecast source is kept separate from the planner so another service can be plugged in later.</p>
+
+        <button type="submit" class="btn primary wide">Save settings</button>
+        <p id="savedMsg" class="saved" hidden>Saved.</p>
+      </form>
+    </section>
+  </main>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
