@@ -44,7 +44,7 @@ function saveSettings(s) {
 }
 
 let settings = loadSettings();
-const state = { start: null, dest: null, picking: null, layers: [] };
+const state = { start: null, dest: null, picking: null, layers: [], plan: null };
 
 // ---------- Views ----------
 document.querySelectorAll('.tab').forEach((t) =>
@@ -224,6 +224,7 @@ function fitPoints() {
 function clearRoute() {
   state.layers.forEach((l) => map.removeLayer(l));
   state.layers = [];
+  state.plan = null;
   $('result').innerHTML = '';
 }
 function showError(msg) {
@@ -272,10 +273,12 @@ $('btnPlan').onclick = async () => {
     if (route.ok) {
       drawRoute(route);
       renderRoute(route, direct, forecast.source);
+      state.plan = { route, departT, source: forecast.source };
     } else {
       const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
       renderNoRoute(route, later, forecast);
       if (later) drawRoute(later, true);
+      state.plan = { route: later, departT, source: forecast.source, alternative: !!later };
     }
     renderWindows(scan, departT, forecast);
   } catch (e) {
@@ -496,6 +499,80 @@ ${rtepts}
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
+
+// ---------- Print ----------
+$('btnPrint').onclick = () => {
+  $('printReport').innerHTML = buildReport();
+  window.print();
+};
+
+function buildReport() {
+  const s = settings;
+  const v = (x, unit) => (x === '' || x == null ? '–' : `${x} ${unit}`);
+  const limitRows = SECTORS.map(
+    (sec, i) => `<tr><td>${sec.label} (${sec.range})</td><td>${v(s.limitsFt[i], 'ft')}</td><td>${v(s.windLimitsKt[i], 'kt')}</td></tr>`
+  ).join('');
+  const provider = providers[s.provider]?.name || s.provider;
+  let html = `<h1>Wx Router${s.name ? ' · ' + escapeHtml(s.name) : ''}</h1>
+    <p class="printed">Printed ${new Date().toLocaleString()}</p>
+    <h2>Vessel settings</h2>
+    <table class="kv">
+      <tr><td>Vessel name</td><td>${escapeHtml(s.name || '–')}</td></tr>
+      <tr><td>Length</td><td>${v(s.lengthFt, 'ft')}</td></tr>
+      <tr><td>Freeboard</td><td>${v(s.freeboardFt, 'ft')}</td></tr>
+      <tr><td>Draft</td><td>${v(s.draftFt, 'ft')}</td></tr>
+      <tr><td>Cruise speed</td><td>${v(s.speedKt, 'kt')}</td></tr>
+      <tr><td>Steep, short seas</td><td>avoid waves over ${s.steepHsFt} ft at ${s.steepPeriodS} s or less</td></tr>
+      <tr><td>Forecast source</td><td>${escapeHtml(provider)}</td></tr>
+    </table>
+    <h3>Limits by direction off the bow</h3>
+    <table class="grid"><thead><tr><th>Direction</th><th>Max seas</th><th>Max wind</th></tr></thead><tbody>${limitRows}</tbody></table>
+    <h2>Route</h2>
+    <table class="kv">
+      <tr><td>Start</td><td>${state.start ? formatLatLon(state.start) : 'Not set'}</td></tr>
+      <tr><td>Destination</td><td>${state.dest ? formatLatLon(state.dest) : 'Not set'}</td></tr>
+      <tr><td>Departure asked for</td><td>${$('departAt').value ? fmtTime(new Date($('departAt').value).getTime() / 1000) : '–'}</td></tr>
+    </table>`;
+  if (!state.plan) {
+    return html + `<p>No route planned yet. Tap <strong>Plan route</strong> before printing to include it.</p>`;
+  }
+  if (state.plan.route) html += routeSketch(state.plan.route);
+  // Reuse what's on screen, minus the buttons.
+  const copy = $('result').cloneNode(true);
+  copy.querySelectorAll('button').forEach((b) => b.remove());
+  return html + copy.innerHTML;
+}
+
+// Simple outline of the route with labelled waypoints (chart tiles don't print reliably).
+function routeSketch(route) {
+  const pts = [route.legs[0].from, ...route.legs.map((l) => l.to)];
+  const k = Math.cos((pts.reduce((a, p) => a + p.lat, 0) / pts.length) * (Math.PI / 180));
+  const xs = pts.map((p) => p.lon * k);
+  const ys = pts.map((p) => -p.lat);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const W = 600, H = 260, pad = 30;
+  const sc = Math.min((W - 2 * pad) / (x1 - x0 || 1), (H - 2 * pad) / (y1 - y0 || 1));
+  const ox = (W - (x1 - x0) * sc) / 2, oy = (H - (y1 - y0) * sc) / 2;
+  const P = pts.map((_, i) => [ox + (xs[i] - x0) * sc, oy + (ys[i] - y0) * sc]);
+  const labels = pts.map((_, i) => (i === 0 ? 'Start' : i === pts.length - 1 ? 'Destination' : 'WP' + i));
+  return `<svg class="sketch" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${W}" height="${H}" fill="#eef5f8" stroke="#9bb"/>
+    <polyline points="${P.map((p) => p.map((n) => n.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="#0b3d5c" stroke-width="3"${state.plan.alternative ? ' stroke-dasharray="8 6"' : ''}/>
+    ${P.map((p, i) => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="5" fill="${i === 0 ? '#2e8b57' : i === P.length - 1 ? '#c0392b' : '#0b3d5c'}"/><text x="${(p[0] + 8).toFixed(1)}" y="${(p[1] - 6).toFixed(1)}" font-size="12">${labels[i]}</text>`).join('')}
+    <text x="${W - 8}" y="18" font-size="12" text-anchor="end">N ↑</text>
+  </svg>`;
+}
+
+// ---------- Exit ----------
+// A web app can only close its own window in some browsers, so if it is
+// still open a moment later, show a closed screen with how to leave.
+$('btnExit').onclick = () => {
+  window.close();
+  setTimeout(() => {
+    if (!window.closed) $('exitScreen').hidden = false;
+  }, 300);
+};
+$('btnReturn').onclick = () => ($('exitScreen').hidden = true);
 
 // ---------- Start up ----------
 fillForm();

@@ -110,3 +110,37 @@ table.legs th { color: var(--muted); font-weight: 600; }
 .legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
 ul.windows { margin: 4px 0 8px; padding-left: 18px; }
+
+.exit {
+  background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.4);
+  width: 32px; height: 32px; border-radius: 50%; font-size: 16px; line-height: 1; padding: 0; flex: none;
+}
+#btnPrint { margin-top: 8px; }
+.exit-screen {
+  position: fixed; inset: 0; z-index: 3000; background: var(--navy); color: #fff;
+  display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
+}
+.exit-screen[hidden] { display: none; }
+.exit-screen > div { max-width: 360px; }
+.exit-screen .note { color: #cfe3ee; }
+.exit-screen .btn.primary { background: #fff; color: var(--navy); }
+#printReport { display: none; }
+
+@media print {
+  body { display: block; background: #fff; color: #000; }
+  body > header, main, .exit-screen { display: none !important; }
+  #printReport { display: block; font-size: 11pt; }
+  #printReport * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  #printReport h1 { font-size: 18pt; margin: 0 0 2pt; }
+  #printReport h2 { font-size: 14pt; margin: 14pt 0 4pt; border-bottom: 1px solid #999; }
+  #printReport h3 { font-size: 12pt; margin: 8pt 0 4pt; }
+  #printReport .printed { color: #555; margin: 0 0 6pt; }
+  #printReport table { border-collapse: collapse; width: 100%; }
+  #printReport td, #printReport th { border: 1px solid #bbb; padding: 3pt 5pt; text-align: left; vertical-align: top; }
+  #printReport table.kv td:first-child { width: 35%; font-weight: 600; }
+  #printReport tr, #printReport .card, #printReport .sketch { break-inside: avoid; }
+  #printReport .card { border: 1px solid #999; border-radius: 0; padding: 6pt; margin-top: 8pt; }
+  #printReport .sketch { width: 100%; max-height: 3in; margin: 6pt 0; }
+  #printReport .timeline .tick span { color: #000; }
+  :root { --text: #000; --muted: #444; --line: #ccc; --card: #fff; }
+}

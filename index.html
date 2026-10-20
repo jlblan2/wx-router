@@ -21,6 +21,7 @@
       <button id="tabRoute" class="tab active" data-view="routeView">Route</button>
       <button id="tabSettings" class="tab" data-view="settingsView">Settings</button>
     </nav>
+    <button id="btnExit" class="exit" aria-label="Exit Wx Router" title="Exit">&#x2715;</button>
   </header>
 
   <main>
@@ -49,6 +50,7 @@
           <input type="datetime-local" id="departAt">
         </div>
         <button id="btnPlan" class="btn primary wide">Plan route</button>
+        <button id="btnPrint" class="btn wide">Print settings and route</button>
         <div id="progress" class="progress" hidden></div>
         <div id="result"></div>
       </div>
@@ -98,6 +100,18 @@
       </form>
     </section>
   </main>
+
+  <!-- Filled in just before printing; only visible on paper. -->
+  <div id="printReport"></div>
+
+  <div id="exitScreen" class="exit-screen" hidden>
+    <div>
+      <h2>Wx Router is closed</h2>
+      <p>Your settings are saved on this phone.</p>
+      <p class="note">If the app is still on screen, close it the usual way: on iPhone, swipe up from the bottom of the screen; on Android, tap Back or swipe the app away.</p>
+      <button id="btnReturn" class="btn primary wide">Return to Wx Router</button>
+    </div>
+  </div>
 
   <script src="vendor/leaflet/leaflet.js"></script>
   <script type="module" src="js/app.js"></script>

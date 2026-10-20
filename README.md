@@ -20,6 +20,11 @@ the boat inside the captain's sea-state limits.
    and the most comfortable departure offered. Tap a green hour to plan that departure.
    Departures whose arrival falls after the end of the forecast are shown as unknown.
 
+5. **Print settings and route** (below Plan route) prints the vessel settings, all limits,
+   a sketch of the route, the departure windows and the waypoint table.
+6. **X** (top right) exits. Phones don't let a web app close itself, so if it stays open
+   a "closed" screen appears; close it the usual way (swipe up on iPhone, Back on Android).
+
 ## How the planner works (`js/router.js`)
 - Lays a lattice of candidate waypoints over a corridor either side of the direct line
   (about 30% of the distance each side).
