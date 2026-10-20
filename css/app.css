@@ -98,3 +98,15 @@ table.legs th { color: var(--muted); font-weight: 600; }
 .limit-inputs label { display: grid; grid-template-columns: 1fr 80px; align-items: center; gap: 6px; }
 .limit-inputs .range { color: var(--muted); font-weight: 400; font-size: 12px; }
 .saved { color: var(--ok); font-weight: 600; text-align: center; }
+.card h4 { margin: 12px 0 4px; font-size: 14px; }
+.timeline { position: relative; height: 26px; margin: 8px 0 22px; border-radius: 4px; overflow: visible; background: var(--line); }
+.timeline .slot { position: absolute; top: 0; bottom: 0; }
+.slot.go, .legend i.go { background: var(--ok); cursor: pointer; }
+.slot.nogo, .legend i.nogo { background: var(--bad); opacity: .75; }
+.slot.unknown, .legend i.unknown { background: var(--line); }
+.timeline .tick { position: absolute; top: -2px; bottom: -4px; border-left: 1px solid var(--text); opacity: .6; }
+.timeline .tick span { position: absolute; top: 30px; left: -14px; font-size: 11px; white-space: nowrap; }
+.timeline .marker { position: absolute; top: -5px; bottom: -5px; width: 3px; margin-left: -1px; background: var(--navy); border: 1px solid #fff; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+ul.windows { margin: 4px 0 8px; padding-left: 18px; }

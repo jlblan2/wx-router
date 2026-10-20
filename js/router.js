@@ -233,14 +233,42 @@ function mergeLegs(legs) {
   return out;
 }
 
-// If the requested departure has no safe route, step forward in time and
-// report the earliest departure that works.
-export function findEarliestDeparture(grid, forecast, fromT, vessel, opts = {}) {
-  const step = (opts.stepHours ?? 3) * 3600;
-  const lastT = forecast.times[forecast.times.length - 1];
-  for (let t = fromT + step; t < lastT; t += step) {
-    const r = planRoute(grid, forecast, t, vessel, opts);
-    if (r.ok) return r;
+// Try every departure hour the forecast covers and report when the passage
+// can be made within the limits.
+//   slots:   one per hour, status 'go' | 'nogo' | 'unknown' (arrival would be
+//            past the end of the forecast, so it can't be judged yet)
+//   windows: runs of consecutive 'go' hours, as { start, end } departure times
+//   best:    the 'go' departure with the lowest worst-vs-limit, then the shortest passage
+export function scanDepartures(grid, forecast, vessel, opts = {}) {
+  const step = (opts.stepHours ?? 1) * 3600;
+  const first = forecast.times[0];
+  const last = forecast.times[forecast.times.length - 1];
+  const minHours = grid.distanceNm / vessel.speedKt;
+  const slots = [];
+  for (let t = Math.ceil(Math.max(opts.fromT ?? first, first) / 3600) * 3600; t < last; t += step) {
+    if (t + minHours * 3600 > last) {
+      slots.push({ t, status: 'unknown' });
+      continue;
+    }
+    const route = planRoute(grid, forecast, t, vessel, opts);
+    slots.push(route.ok ? { t, status: 'go', route } : { t, status: route.stats.beyond && !route.stats.seas && !route.stats.wind && !route.stats.steep ? 'unknown' : 'nogo' });
   }
-  return null;
+  const windows = [];
+  for (const sl of slots) {
+    const w = windows[windows.length - 1];
+    if (sl.status !== 'go') continue;
+    if (w && sl.t - w.end === step) w.end = sl.t;
+    else windows.push({ start: sl.t, end: sl.t });
+  }
+  let best = null;
+  for (const sl of slots) {
+    if (sl.status !== 'go') continue;
+    const r = sl.route;
+    const better =
+      !best ||
+      r.maxRatio < best.maxRatio - 0.02 ||
+      (Math.abs(r.maxRatio - best.maxRatio) <= 0.02 && r.arriveT - r.departT < best.arriveT - best.departT);
+    if (better) best = r;
+  }
+  return { slots, windows, best, step };
 }

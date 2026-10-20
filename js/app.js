@@ -1,4 +1,4 @@
-import { SECTORS, buildGrid, planRoute, evaluateDirect, findEarliestDeparture } from './router.js';
+import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures } from './router.js';
 import { providers } from './providers.js';
 import { formatLatLon } from './geo.js';
 
@@ -161,6 +161,7 @@ const markers = {};
 function setPoint(which, latlng) {
   const p = { lat: latlng.lat, lon: latlng.lng ?? latlng.lon };
   state[which] = p;
+  state.cache = null;
   if (markers[which]) markers[which].setLatLng([p.lat, p.lon]);
   else {
     markers[which] = L.marker([p.lat, p.lon], {
@@ -255,8 +256,7 @@ $('btnPlan').onclick = async () => {
   $('btnPlan').disabled = true;
   try {
     progress('Laying out candidate waypoints…');
-    const grid = buildGrid(state.start, state.dest);
-    const forecast = await provider.getForecast(grid.nodes, progress);
+    const { grid, forecast } = await getForecast(provider);
     const { times } = forecast;
     if (departT < times[0] || departT > times[times.length - 1]) {
       return showError(
@@ -266,14 +266,18 @@ $('btnPlan').onclick = async () => {
     progress('Finding the best route…');
     const route = planRoute(grid, forecast, departT, vessel);
     const direct = evaluateDirect(grid, forecast, departT, vessel);
+    progress('Checking every departure time in the forecast…');
+    await new Promise((r) => setTimeout(r, 0)); // let the message paint
+    const scan = scanDepartures(grid, forecast, vessel, { fromT: Math.min(departT, Date.now() / 1000) });
     if (route.ok) {
       drawRoute(route);
       renderRoute(route, direct, forecast.source);
     } else {
-      const later = findEarliestDeparture(grid, forecast, departT, vessel);
+      const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
       renderNoRoute(route, later, forecast);
       if (later) drawRoute(later, true);
     }
+    renderWindows(scan, departT, forecast);
   } catch (e) {
     showError(`Could not get the forecast: ${e.message}. Check the connection and try again.`);
   } finally {
@@ -281,6 +285,77 @@ $('btnPlan').onclick = async () => {
     $('btnPlan').disabled = false;
   }
 };
+
+// The forecast for a start/destination pair is reused for 30 minutes, so
+// trying other departure times doesn't download it again.
+async function getForecast(provider) {
+  const key = JSON.stringify([state.start, state.dest, provider.id]);
+  const c = state.cache;
+  if (c && c.key === key && Date.now() - c.at < 30 * 60 * 1000) return c;
+  const grid = buildGrid(state.start, state.dest);
+  const forecast = await provider.getForecast(grid.nodes, progress);
+  state.cache = { key, at: Date.now(), grid, forecast };
+  return state.cache;
+}
+
+function setDepart(t) {
+  const d = new Date(t * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  $('departAt').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Go/no-go timeline of departure times across the forecast, the windows when
+// the passage works, and the most comfortable departure.
+function renderWindows(scan, departT, forecast) {
+  const { slots, windows, best } = scan;
+  if (!slots.length) return;
+  const t0 = slots[0].t;
+  const span = slots[slots.length - 1].t + scan.step - t0;
+  const pct = (t) => (((t - t0) / span) * 100).toFixed(2);
+  const bar = slots
+    .map((sl) => `<div class="slot ${sl.status}" style="left:${pct(sl.t)}%;width:${((scan.step / span) * 100).toFixed(2)}%" data-t="${sl.t}" title="${fmtTime(sl.t)}: ${{ go: 'within limits', nogo: 'outside limits', unknown: 'beyond forecast' }[sl.status]}"></div>`)
+    .join('');
+  // Midnight ticks with day names.
+  let ticks = '';
+  const d = new Date(t0 * 1000);
+  d.setHours(24, 0, 0, 0);
+  for (let t = d.getTime() / 1000; t < t0 + span; t += 86400) {
+    ticks += `<div class="tick" style="left:${pct(t)}%"><span>${new Date(t * 1000).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })}</span></div>`;
+  }
+  const marker = departT >= t0 && departT < t0 + span ? `<div class="marker" style="left:${pct(departT)}%" title="Your departure"></div>` : '';
+  const fmtWin = (w) =>
+    w.start === w.end ? `${fmtTime(w.start)} only` : `${fmtTime(w.start)} to ${fmtTime(w.end)}`;
+  const list = windows.length
+    ? `<ul class="windows">${windows.map((w) => `<li>${fmtWin(w)}</li>`).join('')}</ul>`
+    : `<p>No departure in the forecast keeps the passage within your limits.</p>`;
+  const unknownFrom = slots.find((sl) => sl.status === 'unknown');
+  const bestHtml = best
+    ? `<p><strong>Best departure: ${fmtTime(best.departT)}</strong>, arriving ${fmtTime(best.arriveT)} (${fmtDur((best.arriveT - best.departT) / 3600)}, worst ${Math.round(best.maxRatio * 100)}% of your limits).</p>
+       <button class="btn" id="btnUseBest">Use best departure</button>`
+    : '';
+  $('result').insertAdjacentHTML(
+    'afterbegin',
+    `<div class="card"><h3>When can you go?</h3>
+      <p class="note">Each hour you could leave, checked against your limits for the whole passage. Tap a green hour to plan that departure.</p>
+      <div class="timeline">${bar}${ticks}${marker}</div>
+      <div class="legend"><span><i class="go"></i>Within limits</span><span><i class="nogo"></i>Outside limits</span><span><i class="unknown"></i>Forecast too short</span></div>
+      <h4>Departure windows</h4>${list}${bestHtml}
+      ${unknownFrom ? `<p class="note">Departures from ${fmtTime(unknownFrom.t)} on would arrive after the forecast ends (${fmtTime(forecast.times[forecast.times.length - 1])}), so they can't be judged yet.</p>` : ''}
+    </div>`
+  );
+  document.querySelectorAll('.timeline .slot.go').forEach((el) =>
+    el.addEventListener('click', () => {
+      setDepart(Number(el.dataset.t));
+      $('btnPlan').click();
+    })
+  );
+  if (best) {
+    $('btnUseBest').onclick = () => {
+      setDepart(best.departT);
+      $('btnPlan').click();
+    };
+  }
+}
 
 const ratioColor = (r) => (r < 0.7 ? '#2e8b57' : r < 0.9 ? '#d08a00' : '#c0392b');
 
@@ -384,15 +459,11 @@ function renderNoRoute(route, later, forecast) {
       ${summaryStats(later)}${legsTable(later)}
       <p class="note">Shown dashed on the chart. Forecast: ${forecast.source}.</p>
       <button class="btn" id="btnUseLater">Use this departure</button></div>`;
-  } else {
-    html += `<div class="card"><p class="note">No departure in the rest of the forecast (to ${fmtTime(forecast.times[forecast.times.length - 1])}) works with these limits.</p></div>`;
   }
   $('result').innerHTML = html;
   if (later) {
     $('btnUseLater').onclick = () => {
-      const d = new Date(later.departT * 1000);
-      const pad = (n) => String(n).padStart(2, '0');
-      $('departAt').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      setDepart(later.departT);
       $('btnPlan').click();
     };
   }

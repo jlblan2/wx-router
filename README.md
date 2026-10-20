@@ -15,8 +15,10 @@ the boat inside the captain's sea-state limits.
 3. The result shows distance, time underway, ETA, each waypoint with course, worst seas
    and wind, and colours each leg green/amber/red against the limit. **Export GPX**
    sends the route to a chartplotter or nav app.
-4. If no route fits the limits, it searches later departures (3-hour steps) through
-   the end of the forecast and offers the earliest one that works.
+4. **When can you go?** Every departure hour in the forecast is checked for the whole
+   passage. A go/no-go timeline shows which hours work, with the departure windows listed
+   and the most comfortable departure offered. Tap a green hour to plan that departure.
+   Departures whose arrival falls after the end of the forecast are shown as unknown.
 
 ## How the planner works (`js/router.js`)
 - Lays a lattice of candidate waypoints over a corridor either side of the direct line
