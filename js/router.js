@@ -34,6 +34,9 @@ export function relativeBearing(fromDeg, headingDeg) {
   return (((fromDeg - headingDeg) % 360) + 360) % 360;
 }
 
+// Identifies a lattice edge, for depth checks.
+export const edgeKey = (a, b) => `${a.id}-${b.id}`;
+
 export function sectorIndex(relBearing) {
   return Math.round(relBearing / 45) % 8;
 }
@@ -158,6 +161,7 @@ export function evaluateLeg(forecast, a, b, t0, vessel) {
 // cost = hours underway + comfort penalty for running close to the limits.
 export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   const maxJump = opts.maxJump ?? 2;
+  const edgeOk = opts.edgeOk || (() => true); // e.g. depth: false for edges known to be too shallow
   const comfort = opts.comfortWeight ?? 0.6;
   const labels = new Map();
   const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0 };
@@ -170,6 +174,10 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
       for (const b of next) {
         if (!b.fixed && !a.fixed && Math.abs(b.j - a.j) > maxJump) continue;
         if (!b.fixed && !forecast.nodes[b.id]?.sea) continue;
+        if (!edgeOk(a, b)) {
+          stats.shallow = (stats.shallow || 0) + 1;
+          continue;
+        }
         const r = evaluateLeg(forecast, a, b, la.t, vessel);
         if (!r.ok) {
           stats[r.reason]++;
@@ -193,8 +201,12 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
 }
 
 // Follow the direct line (centre lane) without any routing, for comparison.
+export function directPath(grid) {
+  return grid.layers.map((layer) => layer.find((n) => n.j === 0));
+}
+
 export function evaluateDirect(grid, forecast, departT, vessel) {
-  const path = grid.layers.map((layer) => layer.find((n) => n.j === 0));
+  const path = directPath(grid);
   const legs = [];
   let t = departT;
   for (let i = 0; i < path.length - 1; i++) {
@@ -220,6 +232,7 @@ function mergeLegs(legs) {
   for (const l of legs) {
     const prev = out[out.length - 1];
     if (prev && Math.abs(relativeAngle(prev.heading, l.heading)) < 2) {
+      prev.edges.push([l.from, l.to]);
       prev.to = l.to;
       prev.dist += l.dist;
       prev.hrs += l.hrs;
@@ -227,7 +240,7 @@ function mergeLegs(legs) {
       prev.heading = bearingDeg(prev.from, prev.to);
       if (l.worst && (!prev.worst || l.worst.ratio > prev.worst.ratio)) prev.worst = l.worst;
     } else {
-      out.push({ ...l });
+      out.push({ ...l, edges: [[l.from, l.to]] });
     }
   }
   return out;

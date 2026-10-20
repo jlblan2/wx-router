@@ -1,4 +1,5 @@
-import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures } from './router.js';
+import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath } from './router.js';
+import { noaaDepth, demoDepth, DepthChecker, planWithDepth } from './depth.js';
 import { providers } from './providers.js';
 import { formatLatLon } from './geo.js';
 
@@ -14,6 +15,7 @@ const DEFAULTS = {
   // Eight points around the vessel, clockwise from the bow (see SECTORS).
   limitsFt: [4, 4.5, 5, 5, 4, 5, 5, 4.5],
   windLimitsKt: [20, 22, 25, 25, 25, 25, 25, 22],
+  minDepthFt: 6,
   steepHsFt: 6,
   steepPeriodS: 6,
   provider: 'open-meteo',
@@ -35,6 +37,11 @@ function migrate(s) {
     s.limitsFt = [old[0], old[1], beam, old[4], old[5], old[4], beam, old[1]];
   }
   if (!Array.isArray(s.windLimitsKt) || s.windLimitsKt.length !== 8) s.windLimitsKt = [...DEFAULTS.windLimitsKt];
+  // Settings saved before the depth setting: draft plus 3 ft, if a draft was entered.
+  if (!('minDepthSet' in s)) {
+    if (s.draftFt > 0) s.minDepthFt = Math.round((Number(s.draftFt) + 3) * 10) / 10;
+    s.minDepthSet = true;
+  }
   return s;
 }
 function saveSettings(s) {
@@ -76,7 +83,7 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'provider']) {
+  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'provider']) {
     form.elements[k].value = settings[k];
   }
   settings.limitsFt.forEach((v, i) => (form.elements[`limit${i}`].value = v));
@@ -90,6 +97,8 @@ function readForm() {
     lengthFt: num('lengthFt'),
     freeboardFt: num('freeboardFt'),
     draftFt: num('draftFt'),
+    minDepthFt: num('minDepthFt'),
+    minDepthSet: true,
     speedKt: num('speedKt'),
     steepHsFt: num('steepHsFt'),
     steepPeriodS: num('steepPeriodS'),
@@ -243,6 +252,7 @@ $('btnPlan').onclick = async () => {
   if (!(settings.speedKt > 0)) problems.push('enter a cruise speed in Settings');
   if (!settings.limitsFt.every((v) => v > 0)) problems.push('enter all eight sea limits in Settings');
   if (!settings.windLimitsKt.every((v) => v > 0)) problems.push('enter all eight wind limits in Settings');
+  if (!(settings.minDepthFt > 0)) problems.push('enter a minimum water depth in Settings');
   const departT = Math.floor(new Date($('departAt').value).getTime() / 1000);
   if (!departT) problems.push('choose a departure date and time');
   if (problems.length) return showError(`Please ${problems.join(', ')}.`);
@@ -264,15 +274,33 @@ $('btnPlan').onclick = async () => {
         `The forecast runs from ${fmtTime(times[0])} to ${fmtTime(times[times.length - 1])}. Pick a departure inside that window.`
       );
     }
-    progress('Finding the best route…');
-    const route = planRoute(grid, forecast, departT, vessel);
-    const direct = evaluateDirect(grid, forecast, departT, vessel);
-    progress('Checking every departure time in the forecast…');
+    progress('Finding the best route and checking every departure time…');
     await new Promise((r) => setTimeout(r, 0)); // let the message paint
-    const scan = scanDepartures(grid, forecast, vessel, { fromT: Math.min(departT, Date.now() / 1000) });
+    const fromT = Math.min(departT, Date.now() / 1000);
+    let route, scan;
+    const plan = (edgeOk) => {
+      route = planRoute(grid, forecast, departT, vessel, { edgeOk });
+      scan = scanDepartures(grid, forecast, vessel, { fromT, edgeOk });
+      return [route.ok ? route : null, ...scan.slots.map((sl) => sl.route)];
+    };
+    const checker = getDepthChecker(provider);
+    let depthNote = '';
+    let directShallow = false;
+    try {
+      const res = await planWithDepth(checker, grid.nodes, plan, progress);
+      if (!res.complete) depthNote = 'Some legs could not be depth-checked in time and were left out, so the route may be longer than needed.';
+      const path = directPath(grid);
+      await checker.check(path.slice(1).map((n, i) => [path[i], n]));
+      directShallow = path.slice(1).some((n, i) => !checker.edgeOk(path[i], n));
+    } catch (e) {
+      plan(() => true);
+      state.depthChecker = null;
+      depthNote = `<strong>Water depth was not checked</strong> (${escapeHtml(e.message)}). Check this route against a chart for shallow water before you go.`;
+    }
+    const direct = evaluateDirect(grid, forecast, departT, vessel);
     if (route.ok) {
       drawRoute(route);
-      renderRoute(route, direct, forecast.source);
+      renderRoute(route, direct, forecast.source, directShallow);
       state.plan = { route, departT, source: forecast.source };
     } else {
       const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
@@ -281,6 +309,7 @@ $('btnPlan').onclick = async () => {
       state.plan = { route: later, departT, source: forecast.source, alternative: !!later };
     }
     renderWindows(scan, departT, forecast);
+    if (depthNote) $('result').insertAdjacentHTML('afterbegin', `<div class="card bad">${depthNote}</div>`);
   } catch (e) {
     showError(`Could not get the forecast: ${e.message}. Check the connection and try again.`);
   } finally {
@@ -299,6 +328,17 @@ async function getForecast(provider) {
   const forecast = await provider.getForecast(grid.nodes, progress);
   state.cache = { key, at: Date.now(), grid, forecast };
   return state.cache;
+}
+
+// Depth results are kept with the forecast, so re-planning only checks new legs.
+function getDepthChecker(provider) {
+  const source = provider.id === 'demo' ? demoDepth : noaaDepth;
+  const min = Number(settings.minDepthFt);
+  const c = state.depthChecker;
+  if (!c || c.cacheKey !== state.cache.key || c.minDepthFt !== min || c.source !== source) {
+    state.depthChecker = Object.assign(new DepthChecker(source, min), { cacheKey: state.cache.key });
+  }
+  return state.depthChecker;
 }
 
 function setDepart(t) {
@@ -404,8 +444,10 @@ function legsTable(route) {
       const wind = w?.wind
         ? `${Math.round(w.windKt)} kt ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit})`
         : '–';
+      const dep = state.depthChecker?.legShallowest(l);
+      const depth = dep != null ? `<br><small>shallowest ${Math.round(dep)} ft</small>` : '';
       return `<tr><td>${i === 0 ? 'Start' : 'WP' + i}<br><small>${formatLatLon(l.from)}</small></td>
-        <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm</td><td>${seas}<br><small>${wind}</small></td></tr>`;
+        <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
     .join('');
   const last = route.legs[route.legs.length - 1];
@@ -419,12 +461,21 @@ function summaryStats(route) {
     <div class="stat"><div class="k">Time underway</div><div class="v">${fmtDur((route.arriveT - route.departT) / 3600)}</div></div>
     <div class="stat"><div class="k">Arrive</div><div class="v">${fmtTime(route.arriveT)}</div></div>
     <div class="stat"><div class="k">Worst vs. limit</div><div class="v">${Math.round(route.maxRatio * 100)}%</div></div>
+    ${shallowestStat(route)}
   </div>`;
 }
 
-function renderRoute(route, direct, source) {
+function shallowestStat(route) {
+  const ds = route.legs.map((l) => state.depthChecker?.legShallowest(l)).filter((d) => d != null);
+  if (!ds.length) return '';
+  return `<div class="stat"><div class="k">Shallowest water</div><div class="v">${Math.round(Math.min(...ds))} ft</div></div>`;
+}
+
+function renderRoute(route, direct, source, directShallow = false) {
   let cmp = '';
-  if (!direct.ok && direct.reason === 'seas') {
+  if (directShallow) {
+    cmp = `<p class="note">The direct line crosses water shallower than your ${settings.minDepthFt} ft minimum, so this route goes around it.</p>`;
+  } else if (!direct.ok && direct.reason === 'seas') {
     const w = direct.worst;
     cmp = `<p class="note">The direct line would put ${w.hsFt.toFixed(1)} ft seas ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit} ft), so this route goes around it.</p>`;
   } else if (!direct.ok && direct.reason === 'steep') {
@@ -453,6 +504,8 @@ function renderNoRoute(route, later, forecast) {
   const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas'].filter(Boolean);
   const why = hit.length
     ? `every candidate path runs into ${hit.join(' or ')} beyond your limits`
+    : st.shallow
+      ? `every candidate path crosses water shallower than your ${settings.minDepthFt} ft minimum`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
       : 'no open-water path was found between the two points';
@@ -500,6 +553,20 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
+// ---------- Clear ----------
+$('btnClear').onclick = () => {
+  clearRoute();
+  for (const which of ['start', 'dest']) {
+    if (markers[which]) map.removeLayer(markers[which]);
+    markers[which] = null;
+    state[which] = null;
+  }
+  state.cache = null;
+  $('startText').textContent = 'Not set';
+  $('destText').textContent = 'Not set';
+  setPicking(null);
+};
+
 // ---------- Print ----------
 $('btnPrint').onclick = () => {
   $('printReport').innerHTML = buildReport();
@@ -521,6 +588,7 @@ function buildReport() {
       <tr><td>Length</td><td>${v(s.lengthFt, 'ft')}</td></tr>
       <tr><td>Freeboard</td><td>${v(s.freeboardFt, 'ft')}</td></tr>
       <tr><td>Draft</td><td>${v(s.draftFt, 'ft')}</td></tr>
+      <tr><td>Minimum water depth</td><td>${v(s.minDepthFt, 'ft')}</td></tr>
       <tr><td>Cruise speed</td><td>${v(s.speedKt, 'kt')}</td></tr>
       <tr><td>Steep, short seas</td><td>avoid waves over ${s.steepHsFt} ft at ${s.steepPeriodS} s or less</td></tr>
       <tr><td>Forecast source</td><td>${escapeHtml(provider)}</td></tr>

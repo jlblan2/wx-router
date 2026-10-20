@@ -46,6 +46,7 @@ body {
 main { flex: 1; min-height: 0; position: relative; }
 .view { display: none; height: 100%; }
 .view.active { display: flex; flex-direction: column; }
+#routeView { position: relative; }
 #routeView #map { flex: 1 1 45%; min-height: 220px; }
 .sheet {
   flex: 1 1 55%; overflow-y: auto; background: var(--card);
@@ -143,4 +144,11 @@ ul.windows { margin: 4px 0 8px; padding-left: 18px; }
   #printReport .sketch { width: 100%; max-height: 3in; margin: 6pt 0; }
   #printReport .timeline .tick span { color: #000; }
   :root { --text: #000; --muted: #444; --line: #ccc; --card: #fff; }
+}
+
+.map-btn {
+  position: absolute; top: 10px; right: 10px; z-index: 1000;
+  display: flex; align-items: center; gap: 4px; padding: 6px 10px;
+  background: #fff; color: #13222b; border: 2px solid rgba(0,0,0,.2); border-radius: 6px;
+  font-size: 13px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.2);
 }

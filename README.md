@@ -8,6 +8,7 @@ the boat inside the captain's sea-state limits.
    around the vessel (bow, starboard bow, starboard beam, starboard quarter, stern, port
    quarter, port beam, port bow, each covering 45°) the maximum seas (ft) and maximum
    sustained wind (kt) allowed from that direction.
+   Also a minimum water depth (ft): routes stay out of anything shallower.
    Also "steep, short seas": areas where waves are higher than a set height (default 6 ft)
    with a period at or under a set time (default 6 s) are avoided from any direction.
 2. **Route**: set the start (My location, or Pick on chart), the destination (Pick on
@@ -22,7 +23,8 @@ the boat inside the captain's sea-state limits.
 
 5. **Print settings and route** (below Plan route) prints the vessel settings, all limits,
    a sketch of the route, the departure windows and the waypoint table.
-6. **X** (top right) exits. Phones don't let a web app close itself, so if it stays open
+6. **Clear** (top right of the chart) removes the start, destination and route.
+7. **X** (top right) exits. Phones don't let a web app close itself, so if it stays open
    a "closed" screen appears; close it the usual way (swipe up on iPhone, Back on Android).
 
 ## How the planner works (`js/router.js`)
@@ -43,9 +45,15 @@ the boat inside the captain's sea-state limits.
 Another service can be added as a new provider without touching the planner.
 
 ## Known limits of this first version
-- Land avoidance uses the forecast's own grid (roughly 5–25 km), so it will not see
-  small islands, reefs, channels or shoals. **Draft is stored but not yet checked
-  against depth** (needs a bathymetry source). Always check the route on a real chart.
+- Water depth comes from NOAA NCEI's DEM Global Mosaic (NOAA coastal and regional
+  bathymetry, global data offshore). Waypoints are checked first, then every leg the
+  planner wants to use is sampled every 0.2 nm; shallow legs are blocked and the plan is
+  rerun until every leg in the answer is checked. Those depths are referenced to about
+  high water (MHW or NAVD88), not chart datum, the first and last 0.25 nm near the start
+  and destination aren't checked, and small shoals or reefs can be missed. If the depth
+  service can't be reached, the result says depth was not checked. Always check the
+  route on a real chart.
+- Land avoidance also uses the forecast's own grid (roughly 5–25 km).
 - Uses combined significant wave height and mean direction; swell and wind waves are
   not checked separately yet.
 - Length and freeboard are stored for future use (e.g. suggesting limits); they don't
