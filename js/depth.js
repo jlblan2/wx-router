@@ -78,7 +78,9 @@ export class DepthChecker {
   async checkNodes(nodes) {
     const free = nodes.filter((n) => !n.fixed);
     const depths = await this.source.getDepthsFt(free);
+    this.nodeDepth = new Map();
     free.forEach((n, i) => {
+      this.nodeDepth.set(n.id, depths[i]);
       if (depths[i] != null && depths[i] < this.minDepthFt) this.shallowNodes.add(n.id);
     });
     this.nodesChecked = true;
@@ -135,6 +137,13 @@ export class DepthChecker {
     todo.forEach(([a, b], k) => this.shallowest.set(edgeKey(a, b), mins[k] ?? null));
     return todo.length;
   }
+
+  // Shallowest known depth on an edge or at its ends, for explaining a block.
+  edgeDepth = (a, b) => {
+    const ds = [this.shallowest.get(edgeKey(a, b)), this.nodeDepth?.get(a.id), this.nodeDepth?.get(b.id)];
+    const known = ds.filter((d) => d != null);
+    return known.length ? Math.min(...known) : undefined;
+  };
 
   // Shallowest depth found along a route leg (which may span several edges).
   legShallowest(leg) {

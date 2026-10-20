@@ -20,6 +20,9 @@ the boat inside the captain's sea-state limits.
    passage. A go/no-go timeline shows which hours work, with the departure windows listed
    and the most comfortable departure offered. Tap a green hour to plan that departure.
    Departures whose arrival falls after the end of the forecast are shown as unknown.
+   When no route fits, the app finds the path that goes over the limits least and lists
+   each limit exceeded (seas or wind by direction, steep short seas, depth), by how much,
+   where and when, with red dots on the chart.
 
 5. **Print settings and route** (below Plan route) prints the vessel settings, all limits,
    a sketch of the route, the departure windows and the waypoint table.

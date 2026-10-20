@@ -304,8 +304,11 @@ $('btnPlan').onclick = async () => {
       state.plan = { route, departT, source: forecast.source };
     } else {
       const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
-      renderNoRoute(route, later, forecast);
+      progress('Working out which limits are in the way…');
+      const least = await leastBadRoute(grid, forecast, departT, vessel);
+      renderNoRoute(route, later, forecast, least);
       if (later) drawRoute(later, true);
+      drawProblems(least);
       state.plan = { route: later, departT, source: forecast.source, alternative: !!later };
     }
     renderWindows(scan, departT, forecast);
@@ -499,7 +502,77 @@ function renderRoute(route, direct, source, directShallow = false) {
   $('btnGpx').onclick = () => exportGpx(route);
 }
 
-function renderNoRoute(route, later, forecast) {
+// The path that goes over the limits least, so we can say which limits are in
+// the way, by how much, and where.
+async function leastBadRoute(grid, forecast, departT, vessel) {
+  const dc = state.depthChecker;
+  const opts = {
+    relaxed: true,
+    edgeOk: dc ? dc.edgeOk : () => true,
+    edgeDepth: dc ? dc.edgeDepth : undefined,
+    minDepthFt: Number(settings.minDepthFt),
+  };
+  let least = planRoute(grid, forecast, departT, vessel, opts);
+  if (least.ok && dc) {
+    try {
+      // Make sure the depth along this path is known before describing it.
+      if (await dc.check(least.legs.flatMap((l) => l.edges))) least = planRoute(grid, forecast, departT, vessel, opts);
+    } catch {}
+  }
+  return least;
+}
+
+// One line per limit gone over: the worst case, where and when.
+function explainViolations(least) {
+  const groups = new Map();
+  for (const v of least.violations) {
+    const key = v.kind + (v.sector ?? '');
+    const g = groups.get(key);
+    if (!g) groups.set(key, { ...v, count: 1 });
+    else {
+      g.count++;
+      if (v.over > g.over) Object.assign(g, v, { count: g.count });
+    }
+  }
+  const order = { depth: 0, steep: 1, seas: 2, wind: 3 };
+  const where = (v) => (v.at ? ` near ${formatLatLon(v.at)}` : '');
+  const when = (v) => (v.kind === 'depth' ? '' : `, ${fmtTime(v.t)}`);
+  const items = [...groups.values()]
+    .sort((a, b) => order[a.kind] - order[b.kind] || b.over - a.over)
+    .map((v) => {
+      if (v.kind === 'seas') {
+        return `<li><strong>Seas ${SECTORS[v.sector].short}:</strong> ${v.value.toFixed(1)} ft against your ${v.limit} ft limit, <strong>${(v.value - v.limit).toFixed(1)} ft over</strong>${where(v)}${when(v)}.</li>`;
+      }
+      if (v.kind === 'wind') {
+        return `<li><strong>Wind ${SECTORS[v.sector].short}:</strong> ${Math.round(v.value)} kt against your ${v.limit} kt limit, <strong>${Math.round(v.value - v.limit)} kt over</strong>${where(v)}${when(v)}.</li>`;
+      }
+      if (v.kind === 'steep') {
+        return `<li><strong>Steep, short seas:</strong> ${v.value.toFixed(1)} ft waves ${Math.round(v.periodS)} seconds apart, over your ${v.limit} ft at ${settings.steepPeriodS} s rule by <strong>${(v.value - v.limit).toFixed(1)} ft</strong>${where(v)}${when(v)}.</li>`;
+      }
+      return v.value != null
+        ? `<li><strong>Water depth:</strong> ${Math.max(0, Math.round(v.value))} ft against your ${v.limit} ft minimum, <strong>${Math.round(v.limit - Math.max(0, v.value))} ft too shallow</strong>${where(v)}.</li>`
+        : `<li><strong>Water depth:</strong> shallower than your ${v.limit} ft minimum${where(v)}.</li>`;
+    });
+  return `<p>Even the best path for this departure goes over these limits:</p><ul class="violations">${items.join('')}</ul>
+    <p class="note">Red dots on the chart mark where. Changing any of these limits in Settings, or leaving at a different time, may open a route.</p>`;
+}
+
+function drawProblems(least) {
+  if (!least?.ok) return;
+  const pts = least.legs.flatMap((l, i) => (i === 0 ? [l.from, l.to] : [l.to]));
+  state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
+  for (const v of least.violations) {
+    if (!v.at) continue;
+    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow' }[v.kind];
+    state.layers.push(
+      L.circleMarker([v.at.lat, v.at.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#c0392b', fillOpacity: 0.9 })
+        .bindTooltip(label)
+        .addTo(map)
+    );
+  }
+}
+
+function renderNoRoute(route, later, forecast, least) {
   const st = route.stats;
   const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas'].filter(Boolean);
   const why = hit.length
@@ -509,7 +582,8 @@ function renderNoRoute(route, later, forecast) {
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
       : 'no open-water path was found between the two points';
-  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.</p></div>`;
+  const detail = least?.ok && least.violations.length ? explainViolations(least) : '';
+  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.</p>${detail}</div>`;
   if (later) {
     html += `<div class="card"><h3>Earliest workable departure: ${fmtTime(later.departT)}</h3>
       ${summaryStats(later)}${legsTable(later)}

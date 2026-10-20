@@ -120,7 +120,9 @@ export function sample(forecast, k, t) {
 
 // Check one leg a->b leaving at t0. Returns the worst sea state on the leg,
 // or an infeasible marker with the reason.
-export function evaluateLeg(forecast, a, b, t0, vessel) {
+// With relaxed set, limits don't reject the leg; every limit it goes over is
+// listed in violations instead (used to explain why no route fits).
+export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
   const dist = distanceNm(a, b);
   const hrs = dist / vessel.speedKt;
   const t1 = t0 + hrs * 3600;
@@ -133,6 +135,7 @@ export function evaluateLeg(forecast, a, b, t0, vessel) {
   if (!b.fixed) checks.push([b.id, (t0 + t1) / 2]);
   if (!b.fixed) checks.push([b.id, t1]);
   let worst = null;
+  const violations = [];
   for (const [k, t] of checks) {
     const s = sample(forecast, k, t);
     if (!s) return { ok: false, reason: 'land', dist, hrs, heading };
@@ -146,15 +149,19 @@ export function evaluateLeg(forecast, a, b, t0, vessel) {
     const ratio = Math.max(sea.ratio, wind ? wind.ratio : 0);
     const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > sea.ratio ? 'wind' : 'seas', t };
     if (!worst || ratio > worst.ratio) worst = info;
+    const at = forecast.nodes[k] && { lat: (k === a.id ? a : b).lat, lon: (k === a.id ? a : b).lon };
+    const found = [];
     // Steep, short-period seas are avoided whatever direction they come from.
     const steep = vessel.steep;
     if (steep && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
-      return { ok: false, reason: 'steep', dist, hrs, heading, worst: info };
+      found.push({ kind: 'steep', value: s.hsFt, limit: steep.hsFt, periodS: s.periodS, over: s.hsFt / steep.hsFt - 1 });
     }
-    if (sea.ratio > 1) return { ok: false, reason: 'seas', dist, hrs, heading, worst: info };
-    if (wind && wind.ratio > 1) return { ok: false, reason: 'wind', dist, hrs, heading, worst: info };
+    if (sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
+    if (wind && wind.ratio > 1) found.push({ kind: 'wind', value: s.windKt, limit: wind.limit, sector: wind.sector, over: wind.ratio - 1 });
+    if (found.length && !relaxed) return { ok: false, reason: found[0].kind, dist, hrs, heading, worst: info };
+    for (const v of found) violations.push({ ...v, t, at });
   }
-  return { ok: true, dist, hrs, heading, t1, worst };
+  return { ok: true, dist, hrs, heading, t1, worst, violations };
 }
 
 // Time-dependent search over the lattice for one departure time.
@@ -163,6 +170,7 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   const maxJump = opts.maxJump ?? 2;
   const edgeOk = opts.edgeOk || (() => true); // e.g. depth: false for edges known to be too shallow
   const comfort = opts.comfortWeight ?? 0.6;
+  const relaxed = !!opts.relaxed;
   const labels = new Map();
   const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0 };
   labels.set(grid.layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
@@ -174,17 +182,24 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
       for (const b of next) {
         if (!b.fixed && !a.fixed && Math.abs(b.j - a.j) > maxJump) continue;
         if (!b.fixed && !forecast.nodes[b.id]?.sea) continue;
+        let shallow = null;
         if (!edgeOk(a, b)) {
           stats.shallow = (stats.shallow || 0) + 1;
-          continue;
+          if (!relaxed) continue;
+          const depth = opts.edgeDepth?.(a, b);
+          const min = opts.minDepthFt || 1;
+          shallow = { kind: 'depth', value: depth, limit: min, over: depth != null ? Math.max(0, 1 - depth / min) : 1, at: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }, t: la.t };
         }
-        const r = evaluateLeg(forecast, a, b, la.t, vessel);
+        const r = evaluateLeg(forecast, a, b, la.t, vessel, relaxed);
         if (!r.ok) {
           stats[r.reason]++;
           continue;
         }
+        if (shallow) r.violations.unshift(shallow);
         const ratio = r.worst ? r.worst.ratio : 0;
-        const cost = la.cost + r.hrs * (1 + comfort * ratio * ratio);
+        // Relaxed: going over a limit costs far more than any detour.
+        const penalty = relaxed ? r.violations.reduce((p, v) => p + 500 * (0.2 + v.over), 0) : 0;
+        const cost = la.cost + r.hrs * (1 + comfort * ratio * ratio) + penalty;
         const lb = labels.get(b.id);
         if (!lb || cost < lb.cost) {
           labels.set(b.id, { cost, t: r.t1, prev: a, leg: { ...r, from: a, to: b, t0: la.t } });
@@ -222,7 +237,8 @@ function summarize(legs, departT) {
   const distance = legs.reduce((s, l) => s + l.dist, 0);
   const arriveT = legs.length ? legs[legs.length - 1].t1 : departT;
   const maxRatio = legs.reduce((m, l) => Math.max(m, l.worst ? l.worst.ratio : 0), 0);
-  return { ok: true, legs: mergeLegs(legs), distanceNm: distance, departT, arriveT, maxRatio };
+  const violations = legs.flatMap((l) => l.violations || []);
+  return { ok: true, legs: mergeLegs(legs), distanceNm: distance, departT, arriveT, maxRatio, violations };
 }
 
 // Join consecutive legs that hold the same heading so the waypoint list reads
