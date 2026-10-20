@@ -8,6 +8,8 @@ the boat inside the captain's sea-state limits.
    around the vessel (bow, starboard bow, starboard beam, starboard quarter, stern, port
    quarter, port beam, port bow, each covering 45°) the maximum seas (ft) and maximum
    sustained wind (kt) allowed from that direction.
+   Also "steep, short seas": areas where waves are higher than a set height (default 6 ft)
+   with a period at or under a set time (default 6 s) are avoided from any direction.
 2. **Route**: set the start (My location, or Pick on chart), the destination (Pick on
    chart), and the departure date/time, then **Plan route**.
 3. The result shows distance, time underway, ETA, each waypoint with course, worst seas

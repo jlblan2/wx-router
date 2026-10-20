@@ -89,6 +89,7 @@ table.legs th { color: var(--muted); font-weight: 600; }
 .settings label input, .settings label select { margin-top: 3px; font-weight: 400; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid2 label:first-child { grid-column: 1 / -1; }
+.grid2.steep label:first-child { grid-column: auto; }
 .limits { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: center; }
 @media (max-width: 420px) { .limits { grid-template-columns: 1fr; } .limits svg { max-width: 200px; margin: 0 auto; } }
 .limits svg { width: 100%; }

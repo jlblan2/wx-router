@@ -143,6 +143,11 @@ export function evaluateLeg(forecast, a, b, t0, vessel) {
     const ratio = Math.max(sea.ratio, wind ? wind.ratio : 0);
     const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > sea.ratio ? 'wind' : 'seas', t };
     if (!worst || ratio > worst.ratio) worst = info;
+    // Steep, short-period seas are avoided whatever direction they come from.
+    const steep = vessel.steep;
+    if (steep && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
+      return { ok: false, reason: 'steep', dist, hrs, heading, worst: info };
+    }
     if (sea.ratio > 1) return { ok: false, reason: 'seas', dist, hrs, heading, worst: info };
     if (wind && wind.ratio > 1) return { ok: false, reason: 'wind', dist, hrs, heading, worst: info };
   }
@@ -155,7 +160,7 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   const maxJump = opts.maxJump ?? 2;
   const comfort = opts.comfortWeight ?? 0.6;
   const labels = new Map();
-  const stats = { seas: 0, wind: 0, land: 0, beyond: 0 };
+  const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0 };
   labels.set(grid.layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
   for (let i = 0; i < grid.layers.length - 1; i++) {
     const next = grid.layers[i + 1];

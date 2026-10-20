@@ -80,6 +80,13 @@
           <div id="windInputs" class="limit-inputs"></div>
         </div>
 
+        <h2>Steep, short seas</h2>
+        <p class="note">Avoid any area where the waves are higher than this and come this close together, whatever direction they come from.</p>
+        <div class="grid2 steep">
+          <label>Wave height over (ft)<input name="steepHsFt" type="number" step="0.1" min="0" inputmode="decimal" required></label>
+          <label>Period at or under (s)<input name="steepPeriodS" type="number" step="0.5" min="0" inputmode="decimal" required></label>
+        </div>
+
         <h2>Weather data</h2>
         <label>Forecast source
           <select name="provider" id="providerSelect"></select>

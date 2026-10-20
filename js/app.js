@@ -14,6 +14,8 @@ const DEFAULTS = {
   // Eight points around the vessel, clockwise from the bow (see SECTORS).
   limitsFt: [4, 4.5, 5, 5, 4, 5, 5, 4.5],
   windLimitsKt: [20, 22, 25, 25, 25, 25, 25, 22],
+  steepHsFt: 6,
+  steepPeriodS: 6,
   provider: 'open-meteo',
 };
 
@@ -74,7 +76,7 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'speedKt', 'provider']) {
+  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'provider']) {
     form.elements[k].value = settings[k];
   }
   settings.limitsFt.forEach((v, i) => (form.elements[`limit${i}`].value = v));
@@ -89,6 +91,8 @@ function readForm() {
     freeboardFt: num('freeboardFt'),
     draftFt: num('draftFt'),
     speedKt: num('speedKt'),
+    steepHsFt: num('steepHsFt'),
+    steepPeriodS: num('steepPeriodS'),
     provider: form.elements.provider.value,
     limitsFt: SECTORS.map((_, i) => Number(form.elements[`limit${i}`].value)),
     windLimitsKt: SECTORS.map((_, i) => Number(form.elements[`wind${i}`].value)),
@@ -241,7 +245,12 @@ $('btnPlan').onclick = async () => {
   if (!departT) problems.push('choose a departure date and time');
   if (problems.length) return showError(`Please ${problems.join(', ')}.`);
 
-  const vessel = { speedKt: settings.speedKt, limitsFt: settings.limitsFt, windLimitsKt: settings.windLimitsKt };
+  const vessel = {
+    speedKt: settings.speedKt,
+    limitsFt: settings.limitsFt,
+    windLimitsKt: settings.windLimitsKt,
+    steep: { hsFt: Number(settings.steepHsFt), periodS: Number(settings.steepPeriodS) },
+  };
   const provider = providers[settings.provider] || providers['open-meteo'];
   $('btnPlan').disabled = true;
   try {
@@ -312,7 +321,7 @@ function legsTable(route) {
     .map((l, i) => {
       const w = l.worst;
       const seas = w
-        ? `<span class="dot" style="background:${ratioColor(w.ratio)}"></span>${w.hsFt.toFixed(1)} ft ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit})`
+        ? `<span class="dot" style="background:${ratioColor(w.ratio)}"></span>${w.hsFt.toFixed(1)} ft${w.periodS != null ? ` @ ${Math.round(w.periodS)}s` : ''} ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit})`
         : '–';
       const wind = w?.wind
         ? `${Math.round(w.windKt)} kt ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit})`
@@ -340,6 +349,9 @@ function renderRoute(route, direct, source) {
   if (!direct.ok && direct.reason === 'seas') {
     const w = direct.worst;
     cmp = `<p class="note">The direct line would put ${w.hsFt.toFixed(1)} ft seas ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit} ft), so this route goes around it.</p>`;
+  } else if (!direct.ok && direct.reason === 'steep') {
+    const w = direct.worst;
+    cmp = `<p class="note">The direct line runs through ${w.hsFt.toFixed(1)} ft seas only ${Math.round(w.periodS)} seconds apart, so this route goes around them.</p>`;
   } else if (!direct.ok && direct.reason === 'wind') {
     const w = direct.worst;
     cmp = `<p class="note">The direct line would put ${Math.round(w.windKt)} kt of wind ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit} kt), so this route goes around it.</p>`;
@@ -359,8 +371,10 @@ function renderRoute(route, direct, source) {
 }
 
 function renderNoRoute(route, later, forecast) {
-  const why = route.stats.seas || route.stats.wind
-    ? `the ${route.stats.seas && route.stats.wind ? 'seas and wind' : route.stats.seas ? 'seas' : 'wind'} forecast along every candidate path exceed your limits`
+  const st = route.stats;
+  const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas'].filter(Boolean);
+  const why = hit.length
+    ? `every candidate path runs into ${hit.join(' or ')} beyond your limits`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
       : 'no open-water path was found between the two points';
