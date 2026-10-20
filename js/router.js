@@ -88,9 +88,12 @@ export function buildGrid(start, dest, opts = {}) {
 
 // Forecast value for node k at unix time t (seconds). Heights interpolate
 // linearly between hours; directions use the nearer hour.
+// Nodes with no sea forecast (rivers, sounds, harbours, land) are only usable
+// when marked sheltered: water confirmed deep enough by the depth check. There
+// only the wind is checked.
 export function sample(forecast, k, t) {
   const node = forecast.nodes[k];
-  if (!node || !node.sea) return null;
+  if (!node || !(node.sea || node.sheltered)) return null;
   const { times } = forecast;
   const x = (t - times[0]) / 3600;
   if (x < 0 || x > times.length - 1) return { beyond: true };
@@ -106,10 +109,11 @@ export function sample(forecast, k, t) {
     return a + (b - a) * w;
   };
   const near = (arr) => (arr ? arr[w < 0.5 ? i0 : i1] : null);
-  const hs = lerp(node.waveHeight);
-  if (hs == null) return null;
+  const hs = node.sea ? lerp(node.waveHeight) : null;
+  if (hs == null && !node.sheltered) return null;
   return {
-    hsFt: hs * M_TO_FT,
+    hsFt: hs == null ? null : hs * M_TO_FT,
+    sheltered: hs == null,
     seasFrom: near(node.waveDirection),
     periodS: lerp(node.wavePeriod),
     windKt: lerp(node.windSpeed),
@@ -140,23 +144,24 @@ export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
     const s = sample(forecast, k, t);
     if (!s) return { ok: false, reason: 'land', dist, hrs, heading };
     if (s.beyond) return { ok: false, reason: 'beyond', dist, hrs, heading };
-    const sea = against(s.hsFt, s.seasFrom, heading, vessel.limitsFt);
+    const sea = s.hsFt != null ? against(s.hsFt, s.seasFrom, heading, vessel.limitsFt) : null;
     // Wind is checked when the source has it and the captain set wind limits.
     const wind =
       s.windKt != null && vessel.windLimitsKt
         ? against(s.windKt, s.windFrom, heading, vessel.windLimitsKt)
         : null;
-    const ratio = Math.max(sea.ratio, wind ? wind.ratio : 0);
-    const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > sea.ratio ? 'wind' : 'seas', t };
+    const seaRatio = sea ? sea.ratio : 0;
+    const ratio = Math.max(seaRatio, wind ? wind.ratio : 0);
+    const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > seaRatio ? 'wind' : 'seas', t };
     if (!worst || ratio > worst.ratio) worst = info;
     const at = forecast.nodes[k] && { lat: (k === a.id ? a : b).lat, lon: (k === a.id ? a : b).lon };
     const found = [];
     // Steep, short-period seas are avoided whatever direction they come from.
     const steep = vessel.steep;
-    if (steep && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
+    if (steep && sea && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
       found.push({ kind: 'steep', value: s.hsFt, limit: steep.hsFt, periodS: s.periodS, over: s.hsFt / steep.hsFt - 1 });
     }
-    if (sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
+    if (sea && sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
     if (wind && wind.ratio > 1) found.push({ kind: 'wind', value: s.windKt, limit: wind.limit, sector: wind.sector, over: wind.ratio - 1 });
     if (found.length && !relaxed) return { ok: false, reason: found[0].kind, dist, hrs, heading, worst: info };
     for (const v of found) violations.push({ ...v, t, at });
@@ -181,7 +186,11 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
       if (!la) continue;
       for (const b of next) {
         if (!b.fixed && !a.fixed && Math.abs(b.j - a.j) > maxJump) continue;
-        if (!b.fixed && !forecast.nodes[b.id]?.sea) continue;
+        const nb = forecast.nodes[b.id];
+        if (!b.fixed && !(nb?.sea || nb?.sheltered)) {
+          stats.land++;
+          continue;
+        }
         let shallow = null;
         if (!edgeOk(a, b)) {
           stats.shallow = (stats.shallow || 0) + 1;

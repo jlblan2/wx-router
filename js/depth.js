@@ -138,6 +138,16 @@ export class DepthChecker {
     return todo.length;
   }
 
+  // Waypoints with no sea forecast but deep enough water become usable
+  // sheltered water (rivers, sounds, harbours). Recomputed each plan, since the
+  // forecast is shared between plans with different minimum depths.
+  markSheltered(forecast) {
+    forecast.nodes.forEach((n, id) => {
+      const d = this.nodeDepth?.get(id);
+      n.sheltered = !n.sea && d != null && d >= this.minDepthFt;
+    });
+  }
+
   // Shallowest known depth on an edge or at its ends, for explaining a block.
   edgeDepth = (a, b) => {
     const ds = [this.shallowest.get(edgeKey(a, b)), this.nodeDepth?.get(a.id), this.nodeDepth?.get(b.id)];

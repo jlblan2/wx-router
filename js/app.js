@@ -287,12 +287,19 @@ $('btnPlan').onclick = async () => {
     let depthNote = '';
     let directShallow = false;
     try {
+      if (!checker.nodesChecked) {
+        progress('Checking water depth…');
+        await checker.checkNodes(grid.nodes);
+      }
+      checker.markSheltered(forecast);
       const res = await planWithDepth(checker, grid.nodes, plan, progress);
       if (!res.complete) depthNote = 'Some legs could not be depth-checked in time and were left out, so the route may be longer than needed.';
       const path = directPath(grid);
       await checker.check(path.slice(1).map((n, i) => [path[i], n]));
       directShallow = path.slice(1).some((n, i) => !checker.edgeOk(path[i], n));
     } catch (e) {
+      // Without depths, water with no sea forecast can't be told from land.
+      forecast.nodes.forEach((n) => (n.sheltered = false));
       plan(() => true);
       state.depthChecker = null;
       depthNote = `<strong>Water depth was not checked</strong> (${escapeHtml(e.message)}). Check this route against a chart for shallow water before you go.`;
@@ -441,7 +448,9 @@ function legsTable(route) {
   const rows = route.legs
     .map((l, i) => {
       const w = l.worst;
-      const seas = w
+      const seas = w && !w.sea
+        ? 'Sheltered water (no sea forecast)'
+        : w
         ? `<span class="dot" style="background:${ratioColor(w.ratio)}"></span>${w.hsFt.toFixed(1)} ft${w.periodS != null ? ` @ ${Math.round(w.periodS)}s` : ''} ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit})`
         : '–';
       const wind = w?.wind
@@ -581,7 +590,9 @@ function renderNoRoute(route, later, forecast, least) {
       ? `every candidate path crosses water shallower than your ${settings.minDepthFt} ft minimum`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
-      : 'no open-water path was found between the two points';
+      : state.depthChecker
+        ? `no water path deep enough (${settings.minDepthFt} ft) was found between the two points. If you're starting or finishing up a narrow or winding river, the planner can't follow the channel yet; set that end at the river mouth or inlet and try again`
+        : 'no open-water path was found between the two points. Water depth could not be checked, so rivers and other water without a sea forecast could not be used';
   const detail = least?.ok && least.violations.length ? explainViolations(least) : '';
   let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.</p>${detail}</div>`;
   if (later) {

@@ -56,6 +56,10 @@ Another service can be added as a new provider without touching the planner.
   and destination aren't checked, and small shoals or reefs can be missed. If the depth
   service can't be reached, the result says depth was not checked. Always check the
   route on a real chart.
+- Rivers, sounds and harbours have no sea forecast. Waypoints there are used only when
+  NOAA depth shows water at least the minimum depth, and only the wind limits apply
+  there. Narrow or winding river channels can still be missed by the planner's grid;
+  if a route can't be found, set that end at the river mouth or inlet.
 - Land avoidance also uses the forecast's own grid (roughly 5–25 km).
 - Uses combined significant wave height and mean direction; swell and wind waves are
   not checked separately yet.
