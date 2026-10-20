@@ -11,16 +11,29 @@ const DEFAULTS = {
   freeboardFt: '',
   draftFt: '',
   speedKt: 8,
-  limitsFt: [4, 4.5, 5, 5, 4.5, 4],
+  // Eight points around the vessel, clockwise from the bow (see SECTORS).
+  limitsFt: [4, 4.5, 5, 5, 4, 5, 5, 4.5],
+  windLimitsKt: [20, 22, 25, 25, 25, 25, 25, 22],
   provider: 'open-meteo',
 };
 
 function loadSettings() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || '{}') };
+    return migrate({ ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE) || '{}') });
   } catch {
     return { ...DEFAULTS };
   }
+}
+// Settings saved before the eight-point change had six sea limits, port and
+// starboard shared (0–30°, 30–60°, 60–90°, 90–120°, 120–150°, 150–180° off the bow).
+function migrate(s) {
+  const old = s.limitsFt;
+  if (Array.isArray(old) && old.length === 6) {
+    const beam = Math.min(old[2], old[3]);
+    s.limitsFt = [old[0], old[1], beam, old[4], old[5], old[4], beam, old[1]];
+  }
+  if (!Array.isArray(s.windLimitsKt) || s.windLimitsKt.length !== 8) s.windLimitsKt = [...DEFAULTS.windLimitsKt];
+  return s;
 }
 function saveSettings(s) {
   try {
@@ -49,10 +62,13 @@ function updateBadge() {
 
 // ---------- Settings screen ----------
 const form = $('settingsForm');
-$('limitInputs').innerHTML = SECTORS.map(
-  (s, i) => `<label><span>${s.label}<br><span class="range">${s.range} off the bow</span></span>
-    <input type="number" step="0.1" min="0" inputmode="decimal" name="limit${i}" required></label>`
-).join('');
+const limitFields = (prefix, step) =>
+  SECTORS.map(
+    (s, i) => `<label><span>${s.label}<br><span class="range">${s.range} off the bow</span></span>
+    <input type="number" step="${step}" min="0" inputmode="decimal" name="${prefix}${i}" required></label>`
+  ).join('');
+$('seaInputs').innerHTML = limitFields('limit', 0.1);
+$('windInputs').innerHTML = limitFields('wind', 1);
 $('providerSelect').innerHTML = Object.values(providers)
   .map((p) => `<option value="${p.id}">${p.name}</option>`)
   .join('');
@@ -62,7 +78,8 @@ function fillForm() {
     form.elements[k].value = settings[k];
   }
   settings.limitsFt.forEach((v, i) => (form.elements[`limit${i}`].value = v));
-  drawDiagram(settings.limitsFt);
+  settings.windLimitsKt.forEach((v, i) => (form.elements[`wind${i}`].value = v));
+  drawDiagrams(settings);
 }
 function readForm() {
   const num = (k) => (form.elements[k].value === '' ? '' : Number(form.elements[k].value));
@@ -74,9 +91,10 @@ function readForm() {
     speedKt: num('speedKt'),
     provider: form.elements.provider.value,
     limitsFt: SECTORS.map((_, i) => Number(form.elements[`limit${i}`].value)),
+    windLimitsKt: SECTORS.map((_, i) => Number(form.elements[`wind${i}`].value)),
   };
 }
-form.addEventListener('input', () => drawDiagram(readForm().limitsFt));
+form.addEventListener('input', () => drawDiagrams(readForm()));
 form.addEventListener('submit', (e) => {
   e.preventDefault();
   settings = readForm();
@@ -86,9 +104,13 @@ form.addEventListener('submit', (e) => {
   setTimeout(() => ($('savedMsg').hidden = true), 2000);
 });
 
-// Boat seen from above, bow up, with the six sectors on each side.
-function drawDiagram(limits) {
-  const svg = $('limitsDiagram');
+function drawDiagrams(s) {
+  drawDiagram($('seaDiagram'), s.limitsFt, '31,122,153');
+  drawDiagram($('windDiagram'), s.windLimitsKt, '92,107,192');
+}
+
+// Boat seen from above, bow up, with a 45° wedge for each of the eight points.
+function drawDiagram(svg, limits, rgb) {
   const max = Math.max(...limits.filter((v) => v > 0), 1);
   const pt = (ang, r) => {
     const a = ((ang - 90) * Math.PI) / 180;
@@ -103,16 +125,12 @@ function drawDiagram(limits) {
   SECTORS.forEach((s, i) => {
     const v = limits[i] || 0;
     const shade = 0.25 + 0.6 * (v / max);
-    for (const side of [1, -1]) {
-      const a1 = side === 1 ? i * 30 : -(i + 1) * 30;
-      const a2 = a1 + 30;
-      out += `<path d="${wedge(a1, a2, 100)}" fill="rgba(31,122,153,${shade.toFixed(2)})" stroke="var(--card)" stroke-width="1.5"/>`;
-      const [tx, ty] = pt(side * (i * 30 + 15), 76);
-      out += `<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}">${v || '–'}</text>`;
-    }
+    out += `<path d="${wedge(i * 45 - 22.5, i * 45 + 22.5, 100)}" fill="rgba(${rgb},${shade.toFixed(2)})" stroke="var(--card)" stroke-width="1.5"/>`;
+    const [tx, ty] = pt(i * 45, 74);
+    out += `<text x="${tx.toFixed(1)}" y="${ty.toFixed(1)}">${v || '–'}</text>`;
   });
   out += `<path d="M0 -34 C14 -18 14 10 11 30 L-11 30 C-14 10 -14 -18 0 -34 Z" fill="var(--navy)" stroke="#fff" stroke-width="1.5"/>`;
-  out += `<text x="0" y="-48" style="font-weight:600">BOW</text>`;
+  out += `<text x="0" y="-44" style="font-weight:600;font-size:9px">BOW</text>`;
   svg.innerHTML = out;
 }
 
@@ -217,12 +235,13 @@ $('btnPlan').onclick = async () => {
   if (!state.start) problems.push('set a start point');
   if (!state.dest) problems.push('set a destination');
   if (!(settings.speedKt > 0)) problems.push('enter a cruise speed in Settings');
-  if (!settings.limitsFt.every((v) => v > 0)) problems.push('enter all six sea limits in Settings');
+  if (!settings.limitsFt.every((v) => v > 0)) problems.push('enter all eight sea limits in Settings');
+  if (!settings.windLimitsKt.every((v) => v > 0)) problems.push('enter all eight wind limits in Settings');
   const departT = Math.floor(new Date($('departAt').value).getTime() / 1000);
   if (!departT) problems.push('choose a departure date and time');
   if (problems.length) return showError(`Please ${problems.join(', ')}.`);
 
-  const vessel = { speedKt: settings.speedKt, limitsFt: settings.limitsFt };
+  const vessel = { speedKt: settings.speedKt, limitsFt: settings.limitsFt, windLimitsKt: settings.windLimitsKt };
   const provider = providers[settings.provider] || providers['open-meteo'];
   $('btnPlan').disabled = true;
   try {
@@ -293,9 +312,11 @@ function legsTable(route) {
     .map((l, i) => {
       const w = l.worst;
       const seas = w
-        ? `<span class="dot" style="background:${ratioColor(w.ratio)}"></span>${w.hsFt.toFixed(1)} ft ${SECTORS[w.sector].label.toLowerCase()} (limit ${w.limitFt})`
+        ? `<span class="dot" style="background:${ratioColor(w.ratio)}"></span>${w.hsFt.toFixed(1)} ft ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit})`
         : '–';
-      const wind = w?.windKt != null ? `${Math.round(w.windKt)} kt from ${deg3(w.windFrom)}` : '–';
+      const wind = w?.wind
+        ? `${Math.round(w.windKt)} kt ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit})`
+        : '–';
       return `<tr><td>${i === 0 ? 'Start' : 'WP' + i}<br><small>${formatLatLon(l.from)}</small></td>
         <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
@@ -317,7 +338,11 @@ function summaryStats(route) {
 function renderRoute(route, direct, source) {
   let cmp = '';
   if (!direct.ok && direct.reason === 'seas') {
-    cmp = `<p class="note">The direct line would put ${direct.worst.hsFt.toFixed(1)} ft ${SECTORS[direct.worst.sector].label.toLowerCase()} on the boat (limit ${direct.worst.limitFt} ft), so this route goes around it.</p>`;
+    const w = direct.worst;
+    cmp = `<p class="note">The direct line would put ${w.hsFt.toFixed(1)} ft seas ${SECTORS[w.sea.sector].short} (limit ${w.sea.limit} ft), so this route goes around it.</p>`;
+  } else if (!direct.ok && direct.reason === 'wind') {
+    const w = direct.worst;
+    cmp = `<p class="note">The direct line would put ${Math.round(w.windKt)} kt of wind ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit} kt), so this route goes around it.</p>`;
   } else if (!direct.ok && direct.reason === 'land') {
     cmp = `<p class="note">The direct line crosses land or water too close to shore for the forecast, so this route goes around it.</p>`;
   } else if (direct.ok) {
@@ -328,14 +353,14 @@ function renderRoute(route, direct, source) {
   }
   $('result').innerHTML = `<div class="card"><h3>Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}</h3>
     ${summaryStats(route)}${cmp}${legsTable(route)}
-    <p class="note">Forecast: ${source}. Colours show the worst seas on each leg against your limit: green under 70%, amber 70–90%, red over 90%.</p>
+    <p class="note">Forecast: ${source}. Colours show the worst seas or wind on each leg against your limits: green under 70%, amber 70–90%, red over 90%.</p>
     <button class="btn" id="btnGpx">Export GPX</button></div>`;
   $('btnGpx').onclick = () => exportGpx(route);
 }
 
 function renderNoRoute(route, later, forecast) {
-  const why = route.stats.seas
-    ? 'the seas forecast along every candidate path exceed your limits'
+  const why = route.stats.seas || route.stats.wind
+    ? `the ${route.stats.seas && route.stats.wind ? 'seas and wind' : route.stats.seas ? 'seas' : 'wind'} forecast along every candidate path exceed your limits`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
       : 'no open-water path was found between the two points';

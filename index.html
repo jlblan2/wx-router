@@ -67,10 +67,17 @@
         </div>
 
         <h2>Maximum seas allowed (ft)</h2>
-        <p class="note">Seas are measured by where they hit the boat relative to the bow. Port and starboard use the same limit.</p>
+        <p class="note">Set by where the seas strike the boat: eight points around the vessel, each covering 45°.</p>
         <div class="limits">
-          <svg id="limitsDiagram" viewBox="-110 -110 220 220" aria-label="Sea limit sectors around the vessel"></svg>
-          <div id="limitInputs" class="limit-inputs"></div>
+          <svg id="seaDiagram" viewBox="-110 -110 220 220" aria-label="Sea limits around the vessel"></svg>
+          <div id="seaInputs" class="limit-inputs"></div>
+        </div>
+
+        <h2>Maximum winds allowed (kt)</h2>
+        <p class="note">Sustained wind, set by where it comes from relative to the bow.</p>
+        <div class="limits">
+          <svg id="windDiagram" viewBox="-110 -110 220 220" aria-label="Wind limits around the vessel"></svg>
+          <div id="windInputs" class="limit-inputs"></div>
         </div>
 
         <h2>Weather data</h2>

@@ -3,31 +3,46 @@
 // The planner lays a lattice of candidate waypoints over a corridor around the
 // direct line, pulls a forecast for every lattice node, then runs a
 // time-dependent shortest-path search. A leg is only allowed if, at the time
-// the boat would be on it, the seas never exceed the captain's limit for the
-// direction the seas hit the vessel from (relative to its heading).
+// the boat would be on it, neither the seas nor the wind exceed the captain's
+// limit for the direction they strike the vessel from (relative to its heading).
 import { distanceNm, bearingDeg, destinationPoint, interpolate } from './geo.js';
 
 export const M_TO_FT = 3.28084;
 
-// Six sectors of relative wave direction, 0° = seas on the bow, 180° = astern.
-// Port and starboard are treated alike.
+// Eight points of the compass relative to the vessel, clockwise from the bow.
+// Each covers 45°, centred on its point (Bow is 337.5°–22.5° off the bow).
 export const SECTORS = [
-  { key: 'head', label: 'Head seas', range: '0–30°' },
-  { key: 'bow', label: 'On the bow', range: '30–60°' },
-  { key: 'fwdBeam', label: 'Forward of the beam', range: '60–90°' },
-  { key: 'aftBeam', label: 'Abaft the beam', range: '90–120°' },
-  { key: 'quarter', label: 'On the quarter', range: '120–150°' },
-  { key: 'following', label: 'Following seas', range: '150–180°' },
+  { key: 'bow', label: 'Bow', short: 'on the bow', range: '0°' },
+  { key: 'stbdBow', label: 'Starboard bow', short: 'on the starboard bow', range: '45°' },
+  { key: 'stbdBeam', label: 'Starboard beam', short: 'on the starboard beam', range: '90°' },
+  { key: 'stbdQtr', label: 'Starboard quarter', short: 'on the starboard quarter', range: '135°' },
+  { key: 'stern', label: 'Stern', short: 'astern', range: '180°' },
+  { key: 'portQtr', label: 'Port quarter', short: 'on the port quarter', range: '225°' },
+  { key: 'portBeam', label: 'Port beam', short: 'on the port beam', range: '270°' },
+  { key: 'portBow', label: 'Port bow', short: 'on the port bow', range: '315°' },
 ];
 
-// Angle between where the seas come FROM and where the boat is heading, 0..180.
-export function relativeAngle(seasFromDeg, headingDeg) {
-  const d = ((((seasFromDeg - headingDeg) % 360) + 540) % 360) - 180;
+// Smallest angle between two directions, 0..180.
+export function relativeAngle(aDeg, bDeg) {
+  const d = ((((aDeg - bDeg) % 360) + 540) % 360) - 180;
   return Math.abs(d);
 }
 
-export function sectorIndex(rel) {
-  return Math.min(5, Math.floor(rel / 30));
+// Where something coming FROM fromDeg strikes a boat on headingDeg,
+// measured clockwise from the bow, 0..360 (90 = starboard beam).
+export function relativeBearing(fromDeg, headingDeg) {
+  return (((fromDeg - headingDeg) % 360) + 360) % 360;
+}
+
+export function sectorIndex(relBearing) {
+  return Math.round(relBearing / 45) % 8;
+}
+
+// Compare one forecast value against the limit for the sector it arrives from.
+function against(value, fromDeg, heading, limits) {
+  const sector = sectorIndex(relativeBearing(fromDeg ?? heading, heading)); // no direction: assume on the bow
+  const limit = limits[sector];
+  return { sector, limit, ratio: limit > 0 ? value / limit : Infinity };
 }
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -119,14 +134,17 @@ export function evaluateLeg(forecast, a, b, t0, vessel) {
     const s = sample(forecast, k, t);
     if (!s) return { ok: false, reason: 'land', dist, hrs, heading };
     if (s.beyond) return { ok: false, reason: 'beyond', dist, hrs, heading };
-    const dir = s.seasFrom ?? heading; // no direction: assume worst case, head seas
-    const rel = relativeAngle(dir, heading);
-    const sec = sectorIndex(rel);
-    const limit = vessel.limitsFt[sec];
-    const ratio = limit > 0 ? s.hsFt / limit : Infinity;
-    const info = { ...s, rel, sector: sec, limitFt: limit, ratio, t };
+    const sea = against(s.hsFt, s.seasFrom, heading, vessel.limitsFt);
+    // Wind is checked when the source has it and the captain set wind limits.
+    const wind =
+      s.windKt != null && vessel.windLimitsKt
+        ? against(s.windKt, s.windFrom, heading, vessel.windLimitsKt)
+        : null;
+    const ratio = Math.max(sea.ratio, wind ? wind.ratio : 0);
+    const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > sea.ratio ? 'wind' : 'seas', t };
     if (!worst || ratio > worst.ratio) worst = info;
-    if (ratio > 1) return { ok: false, reason: 'seas', dist, hrs, heading, worst };
+    if (sea.ratio > 1) return { ok: false, reason: 'seas', dist, hrs, heading, worst: info };
+    if (wind && wind.ratio > 1) return { ok: false, reason: 'wind', dist, hrs, heading, worst: info };
   }
   return { ok: true, dist, hrs, heading, t1, worst };
 }
@@ -137,7 +155,7 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   const maxJump = opts.maxJump ?? 2;
   const comfort = opts.comfortWeight ?? 0.6;
   const labels = new Map();
-  const stats = { seas: 0, land: 0, beyond: 0 };
+  const stats = { seas: 0, wind: 0, land: 0, beyond: 0 };
   labels.set(grid.layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
   for (let i = 0; i < grid.layers.length - 1; i++) {
     const next = grid.layers[i + 1];

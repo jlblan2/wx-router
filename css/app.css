@@ -90,9 +90,9 @@ table.legs th { color: var(--muted); font-weight: 600; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .grid2 label:first-child { grid-column: 1 / -1; }
 .limits { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: center; }
-@media (max-width: 420px) { .limits { grid-template-columns: 1fr; } #limitsDiagram { max-width: 200px; margin: 0 auto; } }
-#limitsDiagram { width: 100%; }
-#limitsDiagram text { font-size: 11px; fill: var(--text); text-anchor: middle; dominant-baseline: middle; }
+@media (max-width: 420px) { .limits { grid-template-columns: 1fr; } .limits svg { max-width: 200px; margin: 0 auto; } }
+.limits svg { width: 100%; }
+.limits svg text { font-size: 11px; fill: var(--text); text-anchor: middle; dominant-baseline: middle; }
 .limit-inputs { display: grid; gap: 6px; }
 .limit-inputs label { display: grid; grid-template-columns: 1fr 80px; align-items: center; gap: 6px; }
 .limit-inputs .range { color: var(--muted); font-weight: 400; font-size: 12px; }

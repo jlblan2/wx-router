@@ -4,10 +4,10 @@ Installable phone web app (PWA) that plans a boat route between two points and k
 the boat inside the captain's sea-state limits.
 
 ## Using it
-1. **Settings**: vessel name, length, freeboard, draft, cruise speed, and the maximum
-   seas (ft) for six directions relative to the bow: head seas 0–30°, on the bow 30–60°,
-   forward of the beam 60–90°, abaft the beam 90–120°, on the quarter 120–150°,
-   following seas 150–180°. Port and starboard share a limit.
+1. **Settings**: vessel name, length, freeboard, draft, cruise speed, and for eight points
+   around the vessel (bow, starboard bow, starboard beam, starboard quarter, stern, port
+   quarter, port beam, port bow, each covering 45°) the maximum seas (ft) and maximum
+   sustained wind (kt) allowed from that direction.
 2. **Route**: set the start (My location, or Pick on chart), the destination (Pick on
    chart), and the departure date/time, then **Plan route**.
 3. The result shows distance, time underway, ETA, each waypoint with course, worst seas
@@ -21,7 +21,7 @@ the boat inside the captain's sea-state limits.
   (about 30% of the distance each side).
 - Downloads an hourly forecast for every lattice point (`js/providers.js`).
 - Searches for the fastest path where, at the time the boat is on each leg, the seas
-  never exceed the limit for the angle they hit the boat at. Among legal paths it prefers
+  and the wind never exceed the limit for the direction they hit the boat from. Among legal paths it prefers
   ones that stay further below the limits.
 - Points with no wave data (land, or too close to shore for the forecast grid) are
   avoided. The start and destination are always allowed so marinas work.
