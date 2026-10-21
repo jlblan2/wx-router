@@ -52,7 +52,12 @@ Another service can be added as a new provider without touching the planner.
 
 ## Known limits of this first version
 - Water depth comes from NOAA NCEI's DEM Global Mosaic (NOAA coastal and regional
-  bathymetry, global data offshore). Waypoints are checked first, then every leg the
+  bathymetry, global data offshore). Wherever the route is within 3 nm of land, it
+  switches to NCEI's highest-resolution coastal models (the 1/9 arc-second, about 3 m,
+  Continuously Updated DEMs, from the "DEM All" service) and samples every 0.05 nm.
+  Land is found by probing 1, 2 and 3 nm either side of each leg. Where no coastal model
+  covers a spot, or that service can't be reached, the Global Mosaic depths are used and
+  the result says so. Waypoints are checked first, then every leg the
   planner wants to use is sampled every 0.2 nm; shallow legs are blocked and the plan is
   rerun until every leg in the answer is checked. Those depths are referenced to about
   high water (MHW or NAVD88), not chart datum, the first and last 0.25 nm near the start

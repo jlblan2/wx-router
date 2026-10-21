@@ -1,5 +1,5 @@
 import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath } from './router.js';
-import { noaaDepth, demoDepth, DepthChecker, planWithDepth } from './depth.js';
+import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, COASTAL_NM } from './depth.js';
 import { providers } from './providers.js';
 import { formatLatLon } from './geo.js';
 
@@ -404,11 +404,13 @@ async function getForecast(provider) {
 
 // Depth results are kept with the forecast, so re-planning only checks new legs.
 function getDepthChecker(provider) {
-  const source = provider.id === 'demo' ? demoDepth : noaaDepth;
+  const demo = provider.id === 'demo';
+  const source = demo ? demoDepth : noaaDepth;
+  const coastal = demo ? demoDepth : noaaCoastalDepth;
   const min = Number(settings.minDepthFt);
   const c = state.depthChecker;
   if (!c || c.cacheKey !== state.cache.key || c.minDepthFt !== min || c.source !== source) {
-    state.depthChecker = Object.assign(new DepthChecker(source, min), { cacheKey: state.cache.key });
+    state.depthChecker = Object.assign(new DepthChecker(source, min, coastal), { cacheKey: state.cache.key });
   }
   return state.depthChecker;
 }
@@ -525,7 +527,8 @@ function legsTable(route) {
         ? `${Math.round(w.windKt)} kt ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit})`
         : '–';
       const dep = state.depthChecker?.legShallowest(l);
-      const depth = dep != null ? `<br><small>shallowest ${Math.round(dep)} ft</small>` : '';
+      const near = state.depthChecker?.legCoastal(l) ? ', near shore' : '';
+      const depth = dep != null ? `<br><small>shallowest ${Math.round(dep)} ft${near}</small>` : '';
       return `<tr><td>${pointLabel(l.from, i, false)}<br><small>${formatLatLon(l.from)}</small></td>
         <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
@@ -551,6 +554,17 @@ function shallowestStat(route) {
   return `<div class="stat"><div class="k">Shallowest water</div><div class="v">${Math.round(Math.min(...ds))} ft</div></div>`;
 }
 
+// Which depth data the route was checked against.
+function depthSourceNote(route) {
+  const dc = state.depthChecker;
+  if (!dc) return '';
+  const coastal = route.legs.some((l) => dc.legCoastal(l));
+  let text = `Depths: ${dc.source.name}`;
+  if (coastal) text += `; within ${COASTAL_NM} nm of shore, ${dc.coastal.name}, checked every 100 yards`;
+  if (dc.coastalError) text += `. High-resolution coastal depths could not be loaded (${escapeHtml(dc.coastalError)}), so the standard depths were used near shore`;
+  return `<p class="note">${text}.</p>`;
+}
+
 function renderRoute(route, direct, source, directShallow = false) {
   let cmp = '';
   if (directShallow) {
@@ -574,6 +588,7 @@ function renderRoute(route, direct, source, directShallow = false) {
   }
   $('result').innerHTML = `<div class="card"><h3>Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}</h3>
     ${summaryStats(route)}${cmp}${legsTable(route)}
+    ${depthSourceNote(route)}
     <p class="note">Forecast: ${source}. Colours show the worst seas or wind on each leg against your limits: green under 70%, amber 70–90%, red over 90%.</p>
     <button class="btn" id="btnGpx">Export GPX</button></div>`;
   $('btnGpx').onclick = () => exportGpx(route);
