@@ -413,7 +413,7 @@ $('btnPlan').onclick = async () => {
     recordCheck(scan);
     if (depthNote) $('result').insertAdjacentHTML('afterbegin', `<div class="card bad">${depthNote}</div>`);
   } catch (e) {
-    showError(`Could not get the forecast: ${e.message}. Check the connection and try again.`);
+    showError(`Could not get the forecast: ${escapeHtml(e.message)}.${/request limit/.test(e.message) ? '' : ' Check the connection and try again.'}`);
   } finally {
     progress('');
     $('btnPlan').disabled = false;

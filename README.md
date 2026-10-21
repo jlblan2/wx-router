@@ -50,6 +50,11 @@ the boat inside the captain's sea-state limits.
 - **Demo**: made-up weather to try the app with no connection.
 Another service can be added as a new provider without touching the planner.
 
+Open-Meteo's free service limits how many forecast points one connection may ask
+for each minute. Points closer together than its model grids share one download,
+long routes are paced to stay under the limit (the progress line says when it is
+waiting), and a "limit exceeded" answer is waited out and retried automatically.
+
 ## Cruising hours
 Settings > Cruising hours can keep the boat off the water during set hours, for
 example 18:00 until 08:00 (the phone's local time). A departure is only workable if it
