@@ -126,7 +126,10 @@
         <label>Forecast source
           <select name="provider" id="providerSelect"></select>
         </label>
-        <p class="note">The forecast source is kept separate from the planner so another service can be plugged in later.</p>
+        <label>Open-Meteo API key (optional)
+          <input name="openMeteoKey" type="text" autocapitalize="off" spellcheck="false" placeholder="Leave blank for the free service">
+        </label>
+        <p class="note">The free Open-Meteo service allows about 10,000 forecast points a day and 600 a minute, and a long route uses several hundred. With a paid Open-Meteo subscription key here, Wx Router uses the subscriber servers, which have no daily or per-minute limit. The key stays on this phone.</p>
 
         <button type="submit" class="btn primary wide">Save settings</button>
         <p id="savedMsg" class="saved" hidden>Saved.</p>

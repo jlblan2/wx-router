@@ -22,6 +22,7 @@ try {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function waitForBudget(n, onProgress) {
+  if (!n) return;
   for (;;) {
     const now = Date.now();
     sent = sent.filter(([t]) => now - t < 60000);
@@ -64,7 +65,7 @@ async function fetchJson(url, n = 1, onProgress = () => {}) {
     }
     const err = new Error(
       limited
-        ? `the free forecast service's ${/daily/i.test(msg) ? 'daily' : /hourly/i.test(msg) ? 'hourly' : ''} request limit for this connection has been reached (${msg}). Please try again later`
+        ? `the free forecast service's ${/daily/i.test(msg) ? 'daily' : /hourly/i.test(msg) ? 'hourly' : ''} request limit for this connection has been reached (${msg}). Try again later, or add an Open-Meteo subscription key in Settings`
         : msg
     );
     err.status = res.status;
@@ -88,7 +89,8 @@ async function inChunks(points, fn) {
 }
 
 // Points closer together than the forecast models' own grids give the same
-// answer, so nearby points share one download.
+// answer, so points are gathered into small fixed cells (about 2.4 nm) and each
+// cell is downloaded once.
 const SNAP_DEG = 0.04;
 function uniquePoints(points) {
   const keyOf = (p) => `${Math.round(p.lat / SNAP_DEG)},${Math.round(p.lon / SNAP_DEG)}`;
@@ -98,59 +100,90 @@ function uniquePoints(points) {
     const k = keyOf(p);
     if (!index.has(k)) {
       index.set(k, unique.length);
-      unique.push(p);
+      // The cell's centre, so the same cell is the same request (and cache
+      // entry) whichever route it falls on.
+      unique.push({ lat: Math.round(p.lat / SNAP_DEG) * SNAP_DEG, lon: Math.round(p.lon / SNAP_DEG) * SNAP_DEG });
     }
     return index.get(k);
   });
   return { unique, map };
 }
 
+// Forecasts already downloaded, per point, so re-planning after moving a pin or
+// adding a waypoint only asks for the new points. Kept for an hour.
+const pointCache = new Map(); // key -> { at, data }
+const CACHE_MS = 60 * 60 * 1000;
+
 export const openMeteo = {
   id: 'open-meteo',
-  name: 'Open-Meteo (free marine + weather forecast)',
-  async getForecast(allPoints, onProgress = () => {}) {
+  name: 'Open-Meteo marine + weather forecast',
+  // opts.apiKey: an Open-Meteo subscription key. It uses the subscriber
+  // servers, which have no per-minute or daily limit.
+  async getForecast(allPoints, onProgress = () => {}, opts = {}) {
     const { unique: points, map } = uniquePoints(allPoints);
-    const marineBase = 'https://marine-api.open-meteo.com/v1/marine';
-    const wxBase = 'https://api.open-meteo.com/v1/forecast';
-    const common = `timeformat=unixtime&timezone=GMT&forecast_days=${DAYS}`;
-    onProgress('Downloading sea state forecast…');
-    // cell_selection=nearest leaves wave data empty over land, which the
-    // planner uses to keep the route off the beach.
-    const marine = await inChunks(points, async (chunk) => {
-      const q = `${coordParams(chunk)}&hourly=wave_height,wave_direction,wave_period&${common}`;
-      try {
-        return await fetchJson(`${marineBase}?${q}&cell_selection=nearest`, chunk.length, onProgress);
-      } catch (e) {
-        if (e.status === 400) return fetchJson(`${marineBase}?${q}`, chunk.length, onProgress);
-        throw e;
-      }
+    const key = (opts.apiKey || '').trim();
+    const host = (name) => `https://${key ? 'customer-' : ''}${name}.open-meteo.com`;
+    const marineBase = `${host('marine-api')}/v1/marine`;
+    const wxBase = `${host('api')}/v1/forecast`;
+    const auth = key ? `&apikey=${encodeURIComponent(key)}` : '';
+    const n = (chunk) => (key ? 0 : chunk.length); // subscribers aren't paced
+    const common = `timeformat=unixtime&timezone=GMT&forecast_days=${DAYS}${auth}`;
+    const day = new Date().toISOString().slice(0, 10); // forecasts start at 00:00 GMT today
+    const cacheKey = (p) => `${day}|${p.lat.toFixed(3)},${p.lon.toFixed(3)}`;
+    const now = Date.now();
+    const todo = points.filter((p) => {
+      const c = pointCache.get(cacheKey(p));
+      return !(c && now - c.at < CACHE_MS);
     });
-    onProgress('Downloading wind forecast…');
-    const wind = await inChunks(points, (chunk) =>
-      fetchJson(
-        `${wxBase}?${coordParams(chunk)}&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kn&${common}`,
-        chunk.length,
-        onProgress
-      )
-    );
-    const times = marine[0].hourly.time;
-    const byPoint = points.map((_, k) => {
-      const m = marine[k].hourly;
-      const w = wind[k]?.hourly;
-      const byTime = new Map((w?.time || []).map((t, i) => [t, i]));
-      const align = (arr) => (arr ? times.map((t) => arr[byTime.get(t)] ?? null) : null);
-      return {
-        sea: m.wave_height.some((v) => v != null),
-        waveHeight: m.wave_height,
-        waveDirection: m.wave_direction,
-        wavePeriod: m.wave_period,
-        windSpeed: align(w?.wind_speed_10m),
-        windDirection: align(w?.wind_direction_10m),
-        windGust: align(w?.wind_gusts_10m),
-      };
-    });
+    if (todo.length) {
+      onProgress(`Downloading sea state forecast for ${todo.length} points…`);
+      // cell_selection=nearest leaves wave data empty over land, which the
+      // planner uses to keep the route off the beach.
+      const marine = await inChunks(todo, async (chunk) => {
+        const q = `${coordParams(chunk)}&hourly=wave_height,wave_direction,wave_period&${common}`;
+        try {
+          return await fetchJson(`${marineBase}?${q}&cell_selection=nearest`, n(chunk), onProgress);
+        } catch (e) {
+          if (e.status === 400) return fetchJson(`${marineBase}?${q}`, n(chunk), onProgress);
+          throw e;
+        }
+      });
+      onProgress('Downloading wind forecast…');
+      const wind = await inChunks(todo, (chunk) =>
+        fetchJson(
+          `${wxBase}?${coordParams(chunk)}&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m&wind_speed_unit=kn&${common}`,
+          n(chunk),
+          onProgress
+        )
+      );
+      todo.forEach((p, k) => {
+        const m = marine[k].hourly;
+        const w = wind[k]?.hourly;
+        const times = m.time;
+        const byTime = new Map((w?.time || []).map((t, i) => [t, i]));
+        const align = (arr) => (arr ? times.map((t) => arr[byTime.get(t)] ?? null) : null);
+        pointCache.set(cacheKey(p), {
+          at: now,
+          data: {
+            times,
+            sea: m.wave_height.some((v) => v != null),
+            waveHeight: m.wave_height,
+            waveDirection: m.wave_direction,
+            wavePeriod: m.wave_period,
+            windSpeed: align(w?.wind_speed_10m),
+            windDirection: align(w?.wind_direction_10m),
+            windGust: align(w?.wind_gusts_10m),
+          },
+        });
+      });
+    }
+    const byPoint = points.map((p) => pointCache.get(cacheKey(p)).data);
+    const times = byPoint[0].times;
     // Each lattice point gets its own copy, since the planner marks nodes.
-    const nodes = map.map((k) => ({ ...byPoint[k] }));
+    const nodes = map.map((k) => {
+      const { times: _, ...d } = byPoint[k];
+      return d;
+    });
     return { source: this.name, times, nodes };
   },
 };

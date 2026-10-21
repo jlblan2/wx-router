@@ -22,6 +22,7 @@ const DEFAULTS = {
   quietStart: '18:00',
   quietEnd: '08:00',
   provider: 'open-meteo',
+  openMeteoKey: '',
 };
 
 function loadSettings() {
@@ -86,7 +87,7 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider']) {
+  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
     form.elements[k].value = settings[k];
   }
   form.elements.quietOn.checked = !!settings.quietOn;
@@ -111,6 +112,7 @@ function readForm() {
     quietStart: form.elements.quietStart.value || DEFAULTS.quietStart,
     quietEnd: form.elements.quietEnd.value || DEFAULTS.quietEnd,
     provider: form.elements.provider.value,
+    openMeteoKey: form.elements.openMeteoKey.value.trim(),
     limitsFt: SECTORS.map((_, i) => Number(form.elements[`limit${i}`].value)),
     windLimitsKt: SECTORS.map((_, i) => Number(form.elements[`wind${i}`].value)),
   };
@@ -427,7 +429,7 @@ async function getForecast(provider) {
   const c = state.cache;
   if (c && c.key === key && Date.now() - c.at < 30 * 60 * 1000) return c;
   const grid = buildGrid(state.start, state.dest, { via: activeVia() });
-  const forecast = await provider.getForecast(grid.nodes, progress);
+  const forecast = await provider.getForecast(grid.nodes, progress, { apiKey: settings.openMeteoKey });
   state.cache = { key, at: Date.now(), grid, forecast };
   return state.cache;
 }

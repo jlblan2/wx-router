@@ -54,6 +54,11 @@ Open-Meteo's free service limits how many forecast points one connection may ask
 for each minute. Points closer together than its model grids share one download,
 long routes are paced to stay under the limit (the progress line says when it is
 waiting), and a "limit exceeded" answer is waited out and retried automatically.
+Forecasts are kept per point for an hour, so re-planning a nearby route only downloads
+new points. The free service also caps each connection at about 10,000 points a day.
+Entering an Open-Meteo subscription key in Settings switches to Open-Meteo's
+subscriber servers (customer-api / customer-marine-api), which have no daily or
+per-minute limit, and turns pacing off.
 
 ## Cruising hours
 Settings > Cruising hours can keep the boat off the water during set hours, for
