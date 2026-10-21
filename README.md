@@ -13,6 +13,9 @@ the boat inside the captain's sea-state limits.
    with a period at or under a set time (default 6 s) are avoided from any direction.
 2. **Route**: set the start (My location, or Pick on chart), the destination (Pick on
    chart), and the departure date/time, then **Plan route**.
+   **Waypoints**: answer Yes to "Add waypoints along the way?" and tap the chart for each
+   one, in order, then Done. The route passes through them in that order; drag a numbered
+   marker to move it or tap Remove in the list.
 3. The result shows distance, time underway, ETA, each waypoint with course, worst seas
    and wind, and colours each leg green/amber/red against the limit. **Export GPX**
    sends the route to a chartplotter or nav app.

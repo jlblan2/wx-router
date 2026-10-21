@@ -51,7 +51,7 @@ function saveSettings(s) {
 }
 
 let settings = loadSettings();
-const state = { start: null, dest: null, picking: null, layers: [], plan: null };
+const state = { start: null, dest: null, via: [], wantVia: false, picking: null, layers: [], plan: null };
 
 // ---------- Views ----------
 document.querySelectorAll('.tab').forEach((t) =>
@@ -188,13 +188,75 @@ function setPicking(which) {
   state.picking = state.picking === which ? null : which;
   $('btnPickStart').classList.toggle('on', state.picking === 'start');
   $('btnPickDest').classList.toggle('on', state.picking === 'dest');
+  $('btnPickVia').classList.toggle('on', state.picking === 'via');
+  $('btnPickVia').textContent = state.picking === 'via' ? 'Done' : 'Add on chart';
   $('pickHint').hidden = !state.picking;
-  $('pickHint').textContent = `Tap the chart to set the ${state.picking === 'start' ? 'start' : 'destination'}`;
+  $('pickHint').textContent =
+    state.picking === 'via'
+      ? `Tap the chart to add waypoint ${state.via.length + 1}`
+      : `Tap the chart to set the ${state.picking === 'start' ? 'start' : 'destination'}`;
+}
+
+// ---------- Intermediate waypoints ----------
+// Only used when the captain says yes to waypoints; the route passes through
+// them in the order they were added.
+const activeVia = () => (state.wantVia ? state.via : []);
+
+function setWantVia(yes) {
+  state.wantVia = yes;
+  $('btnViaYes').classList.toggle('on', yes);
+  $('btnViaNo').classList.toggle('on', !yes);
+  $('btnViaYes').setAttribute('aria-pressed', yes);
+  $('btnViaNo').setAttribute('aria-pressed', !yes);
+  $('viaPanel').hidden = !yes;
+  if (!yes && state.picking === 'via') setPicking(null);
+  if (yes && !state.via.length) setPicking('via');
+  renderVia();
+  state.cache = null;
+  clearRoute();
+}
+$('btnViaYes').onclick = () => setWantVia(true);
+$('btnViaNo').onclick = () => setWantVia(false);
+$('btnPickVia').onclick = () => setPicking('via');
+
+function renderVia() {
+  (markers.via || []).forEach((m) => map.removeLayer(m));
+  markers.via = activeVia().map((p, i) =>
+    L.marker([p.lat, p.lon], { draggable: true, icon: pinIcon('#0b3d5c', String(i + 1)) })
+      .addTo(map)
+      .on('dragend', (e) => {
+        const ll = e.target.getLatLng();
+        state.via[i] = { lat: ll.lat, lon: ll.lng };
+        state.cache = null;
+        clearRoute();
+        renderVia();
+      })
+  );
+  $('viaList').innerHTML = state.via
+    .map((p, i) => `<li><span>${formatLatLon(p)}</span> <button class="btn small" data-i="${i}" aria-label="Remove waypoint ${i + 1}">Remove</button></li>`)
+    .join('');
+  $('viaList').querySelectorAll('button').forEach((b) =>
+    b.addEventListener('click', () => {
+      state.via.splice(Number(b.dataset.i), 1);
+      state.cache = null;
+      clearRoute();
+      renderVia();
+    })
+  );
+  if (state.picking === 'via') $('pickHint').textContent = `Tap the chart to add waypoint ${state.via.length + 1}`;
 }
 $('btnPickStart').onclick = () => setPicking('start');
 $('btnPickDest').onclick = () => setPicking('dest');
 map.on('click', (e) => {
   if (!state.picking) return;
+  if (state.picking === 'via') {
+    // Stay in this mode so several waypoints can be added in a row.
+    state.via.push({ lat: e.latlng.lat, lon: e.latlng.lng });
+    state.cache = null;
+    clearRoute();
+    renderVia();
+    return;
+  }
   setPoint(state.picking, e.latlng);
   setPicking(null);
   fitPoints();
@@ -216,8 +278,8 @@ $('btnLocate').onclick = () => {
   );
 };
 function fitPoints() {
-  const pts = [state.start, state.dest].filter(Boolean).map((p) => [p.lat, p.lon]);
-  if (pts.length === 2) map.fitBounds(pts, { padding: [40, 40] });
+  const pts = [state.start, ...activeVia(), state.dest].filter(Boolean).map((p) => [p.lat, p.lon]);
+  if (pts.length >= 2) map.fitBounds(pts, { padding: [40, 40] });
   else if (pts.length === 1) map.panTo(pts[0]);
 }
 
@@ -331,10 +393,10 @@ $('btnPlan').onclick = async () => {
 // The forecast for a start/destination pair is reused for 30 minutes, so
 // trying other departure times doesn't download it again.
 async function getForecast(provider) {
-  const key = JSON.stringify([state.start, state.dest, provider.id]);
+  const key = JSON.stringify([state.start, activeVia(), state.dest, provider.id]);
   const c = state.cache;
   if (c && c.key === key && Date.now() - c.at < 30 * 60 * 1000) return c;
-  const grid = buildGrid(state.start, state.dest);
+  const grid = buildGrid(state.start, state.dest, { via: activeVia() });
   const forecast = await provider.getForecast(grid.nodes, progress);
   state.cache = { key, at: Date.now(), grid, forecast };
   return state.cache;
@@ -428,7 +490,7 @@ function drawRoute(route, dashed = false) {
     if (i > 0) {
       state.layers.push(
         L.circleMarker([l.from.lat, l.from.lon], { radius: 5, color: '#fff', weight: 2, fillColor: '#0b3d5c', fillOpacity: 1 })
-          .bindTooltip(`WP${i} · ${fmtTime(l.t0)}`)
+          .bindTooltip(`${pointLabel(l.from, i, false)} · ${fmtTime(l.t0)}`)
           .addTo(map)
       );
     }
@@ -444,6 +506,12 @@ function fmtTime(t) {
 const fmtDur = (h) => `${Math.floor(h)}h ${String(Math.round((h % 1) * 60)).padStart(2, '0')}m`;
 const deg3 = (d) => String(Math.round(d) % 360).padStart(3, '0') + '°';
 
+// Course changes are WP1, WP2…; the captain's own waypoints keep their number.
+function pointLabel(node, i, last) {
+  if (node.via) return `Your waypoint ${node.via}`;
+  return i === 0 ? 'Start' : last ? 'Destination' : `WP${i}`;
+}
+
 function legsTable(route) {
   const rows = route.legs
     .map((l, i) => {
@@ -458,7 +526,7 @@ function legsTable(route) {
         : '–';
       const dep = state.depthChecker?.legShallowest(l);
       const depth = dep != null ? `<br><small>shallowest ${Math.round(dep)} ft</small>` : '';
-      return `<tr><td>${i === 0 ? 'Start' : 'WP' + i}<br><small>${formatLatLon(l.from)}</small></td>
+      return `<tr><td>${pointLabel(l.from, i, false)}<br><small>${formatLatLon(l.from)}</small></td>
         <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
     .join('');
@@ -615,7 +683,7 @@ function exportGpx(route) {
   const name = settings.name || 'Wx Router';
   const rtepts = pts
     .map((p, i) => {
-      const nm = i === 0 ? 'Start' : i === pts.length - 1 ? 'Destination' : `WP${i}`;
+      const nm = pointLabel(p, i, i === pts.length - 1);
       return `    <rtept lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"><name>${nm}</name></rtept>`;
     })
     .join('\n');
@@ -650,6 +718,8 @@ $('btnClear').onclick = () => {
   $('startText').textContent = 'Not set';
   $('destText').textContent = 'Not set';
   setPicking(null);
+  state.via = [];
+  setWantVia(false);
 };
 
 // ---------- Print ----------
@@ -683,6 +753,7 @@ function buildReport() {
     <h2>Route</h2>
     <table class="kv">
       <tr><td>Start</td><td>${state.start ? formatLatLon(state.start) : 'Not set'}</td></tr>
+      ${activeVia().map((p, i) => `<tr><td>Your waypoint ${i + 1}</td><td>${formatLatLon(p)}</td></tr>`).join('')}
       <tr><td>Destination</td><td>${state.dest ? formatLatLon(state.dest) : 'Not set'}</td></tr>
       <tr><td>Departure asked for</td><td>${$('departAt').value ? fmtTime(new Date($('departAt').value).getTime() / 1000) : '–'}</td></tr>
     </table>`;
@@ -707,7 +778,7 @@ function routeSketch(route) {
   const sc = Math.min((W - 2 * pad) / (x1 - x0 || 1), (H - 2 * pad) / (y1 - y0 || 1));
   const ox = (W - (x1 - x0) * sc) / 2, oy = (H - (y1 - y0) * sc) / 2;
   const P = pts.map((_, i) => [ox + (xs[i] - x0) * sc, oy + (ys[i] - y0) * sc]);
-  const labels = pts.map((_, i) => (i === 0 ? 'Start' : i === pts.length - 1 ? 'Destination' : 'WP' + i));
+  const labels = pts.map((p, i) => pointLabel(p, i, i === pts.length - 1));
   return `<svg class="sketch" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
     <rect width="${W}" height="${H}" fill="#eef5f8" stroke="#9bb"/>
     <polyline points="${P.map((p) => p.map((n) => n.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="#0b3d5c" stroke-width="3"${state.plan.alternative ? ' stroke-dasharray="8 6"' : ''}/>

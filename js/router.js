@@ -52,38 +52,52 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Lattice of layers from start to destination. Layer 0 is the start, the last
 // layer is the destination, and each layer in between spans the corridor.
+// opts.via adds intermediate waypoints: the route must pass through each, in
+// order. Each stretch between them gets its own corridor, and every waypoint
+// is a one-node layer, so the search can't skip it.
 export function buildGrid(start, dest, opts = {}) {
-  const D = distanceNm(start, dest);
-  const layersCount = opts.layers ?? clamp(Math.round(D / 4), 4, 30);
+  const stops = [start, ...(opts.via || []), dest];
   const lanes = opts.lanes ?? 6; // lanes either side of the direct line
-  const halfWidth = opts.halfWidthNm ?? clamp(D * 0.3, 3, 150);
   const nodes = [];
   const layers = [];
-  for (let i = 0; i <= layersCount; i++) {
-    const f = i / layersCount;
-    const layer = [];
-    if (i === 0 || i === layersCount) {
-      const p = i === 0 ? start : dest;
-      const n = { id: nodes.length, i, j: 0, lat: p.lat, lon: p.lon, fixed: true };
-      nodes.push(n);
-      layer.push(n);
-    } else {
-      const c = interpolate(start, dest, f);
-      const brg = bearingDeg(c, dest);
-      // Narrow the corridor near the ends so lanes fan out from the start
-      // and converge on the destination.
-      const taper = Math.min(1, 3 * Math.min(f, 1 - f));
-      for (let j = -lanes; j <= lanes; j++) {
-        const off = (j / lanes) * halfWidth * taper;
-        const p = off === 0 ? c : destinationPoint(c, brg + 90, off);
-        const n = { id: nodes.length, i, j, lat: p.lat, lon: p.lon, fixed: false };
-        nodes.push(n);
-        layer.push(n);
-      }
+  const addNode = (layer, p, j, fixed, extra = {}) => {
+    const n = { id: nodes.length, i: layers.length, j, lat: p.lat, lon: p.lon, fixed, ...extra };
+    nodes.push(n);
+    layer.push(n);
+  };
+  let total = 0;
+  for (let s = 0; s < stops.length - 1; s++) {
+    const a = stops[s];
+    const b = stops[s + 1];
+    const D = distanceNm(a, b);
+    total += D;
+    const layersCount = opts.layers ?? clamp(Math.round(D / 4), 4, 30);
+    const halfWidth = opts.halfWidthNm ?? clamp(D * 0.3, 3, 150);
+    if (s === 0) {
+      const first = [];
+      addNode(first, a, 0, true);
+      layers.push(first);
     }
-    layers.push(layer);
+    for (let i = 1; i <= layersCount; i++) {
+      const f = i / layersCount;
+      const layer = [];
+      if (i === layersCount) {
+        addNode(layer, b, 0, true, s < stops.length - 2 ? { via: s + 1 } : {});
+      } else {
+        const c = interpolate(a, b, f);
+        const brg = bearingDeg(c, b);
+        // Narrow the corridor near the ends so lanes fan out from one stop
+        // and converge on the next.
+        const taper = Math.min(1, 3 * Math.min(f, 1 - f));
+        for (let j = -lanes; j <= lanes; j++) {
+          const off = (j / lanes) * halfWidth * taper;
+          addNode(layer, off === 0 ? c : destinationPoint(c, brg + 90, off), j, false);
+        }
+      }
+      layers.push(layer);
+    }
   }
-  return { nodes, layers, lanes, distanceNm: D };
+  return { nodes, layers, lanes, distanceNm: total };
 }
 
 // Forecast value for node k at unix time t (seconds). Heights interpolate
@@ -134,10 +148,12 @@ export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
   const checks = [];
   // Ends of the leg at the times the boat is there, plus both ends at mid-leg.
   // Start and destination may sit in a harbour with no wave data; skip those.
-  if (!a.fixed) checks.push([a.id, t0]);
-  if (!a.fixed) checks.push([a.id, (t0 + t1) / 2]);
-  if (!b.fixed) checks.push([b.id, (t0 + t1) / 2]);
-  if (!b.fixed) checks.push([b.id, t1]);
+  // Your own waypoints are checked too when the forecast covers them.
+  const check = (n) => !n.fixed || (n.via && (forecast.nodes[n.id]?.sea || forecast.nodes[n.id]?.sheltered));
+  if (check(a)) checks.push([a.id, t0]);
+  if (check(a)) checks.push([a.id, (t0 + t1) / 2]);
+  if (check(b)) checks.push([b.id, (t0 + t1) / 2]);
+  if (check(b)) checks.push([b.id, t1]);
   let worst = null;
   const violations = [];
   for (const [k, t] of checks) {
@@ -256,7 +272,7 @@ function mergeLegs(legs) {
   const out = [];
   for (const l of legs) {
     const prev = out[out.length - 1];
-    if (prev && Math.abs(relativeAngle(prev.heading, l.heading)) < 2) {
+    if (prev && !prev.to.via && Math.abs(relativeAngle(prev.heading, l.heading)) < 2) {
       prev.edges.push([l.from, l.to]);
       prev.to = l.to;
       prev.dist += l.dist;

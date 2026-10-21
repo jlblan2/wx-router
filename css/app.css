@@ -154,3 +154,10 @@ ul.windows { margin: 4px 0 8px; padding-left: 18px; }
 }
 ul.violations { margin: 6px 0; padding-left: 18px; }
 ul.violations li { margin-bottom: 4px; }
+
+.via-panel { margin: -4px 0 10px 103px; }
+.via-panel ol { margin: 0 0 6px; padding-left: 18px; font-size: 14px; }
+.via-panel li { margin-bottom: 4px; }
+.via-panel li span { color: var(--muted); }
+.btn.small { padding: 2px 8px; font-size: 12px; margin-left: 6px; }
+@media (max-width: 420px) { .via-panel { margin-left: 0; } }

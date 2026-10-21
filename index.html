@@ -50,6 +50,19 @@
           </div>
         </div>
         <div class="row">
+          <label>Waypoints</label>
+          <div class="field-text">Add waypoints along the way?</div>
+          <div class="btns" role="radiogroup" aria-label="Add intermediate waypoints">
+            <button id="btnViaNo" class="btn on" aria-pressed="true">No</button>
+            <button id="btnViaYes" class="btn" aria-pressed="false">Yes</button>
+          </div>
+        </div>
+        <div id="viaPanel" class="via-panel" hidden>
+          <ol id="viaList"></ol>
+          <button id="btnPickVia" class="btn">Add on chart</button>
+          <p class="note">Tap the chart once for each waypoint, in the order you want to pass them, then tap Done. Drag a numbered marker to move it.</p>
+        </div>
+        <div class="row">
           <label for="departAt">Departure</label>
           <input type="datetime-local" id="departAt">
         </div>
