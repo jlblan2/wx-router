@@ -50,6 +50,21 @@ the boat inside the captain's sea-state limits.
 - **Demo**: made-up weather to try the app with no connection.
 Another service can be added as a new provider without touching the planner.
 
+## Cruising hours
+Settings > Cruising hours can keep the boat off the water during set hours, for
+example 18:00 until 08:00 (the phone's local time). A departure is only workable if it
+leaves and arrives outside those hours. With your own waypoints, a passage too long
+for one day stops overnight at a waypoint and continues when the no-cruise hours end;
+the legs table shows each stop. The departure timeline marks hours ruled out only by
+the cruising hours.
+
+## Saved routes
+Save this route keeps the start, waypoints and destination on the phone under a
+name. Check now on a saved route reloads it and plans it from the next hour against
+the latest forecast. Each check's best departure and number of workable departure
+hours is remembered (the last 10), so the list shows whether conditions are getting
+better or worse.
+
 ## Known limits of this first version
 - Water depth comes from NOAA NCEI's DEM Global Mosaic (NOAA coastal and regional
   bathymetry, global data offshore). Wherever the route is within 3 nm of land, it

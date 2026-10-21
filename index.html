@@ -68,6 +68,12 @@
         </div>
         <button id="btnPlan" class="btn primary wide">Plan route</button>
         <button id="btnPrint" class="btn wide">Print settings and route</button>
+        <button id="btnSave" class="btn wide">Save this route</button>
+        <details id="savedBox" class="saved-routes">
+          <summary>Saved routes (<span id="savedCount">0</span>)</summary>
+          <ul id="savedList"></ul>
+          <p class="note">Check a saved route to run it against the latest forecast. Each check is remembered, so you can see whether conditions are getting better or worse.</p>
+        </details>
         <div id="progress" class="progress" hidden></div>
         <div id="result"></div>
       </div>
@@ -107,6 +113,14 @@
           <label>Wave height over (ft)<input name="steepHsFt" type="number" step="0.1" min="0" inputmode="decimal" required></label>
           <label>Period at or under (s)<input name="steepPeriodS" type="number" step="0.5" min="0" inputmode="decimal" required></label>
         </div>
+
+        <h2>Cruising hours</h2>
+        <label class="check"><input type="checkbox" name="quietOn" id="quietOn"> Don't cruise during set hours</label>
+        <div class="grid2 steep" id="quietTimes">
+          <label>No cruising from<input name="quietStart" type="time" required></label>
+          <label>Until<input name="quietEnd" type="time" required></label>
+        </div>
+        <p class="note">For example 18:00 until 08:00 keeps you off the water overnight. Times are this phone's local time. Every departure must arrive before the no-cruise hours start; on longer trips, add your own waypoints where you can anchor, and the route stops there overnight and goes on the next morning.</p>
 
         <h2>Weather data</h2>
         <label>Forecast source

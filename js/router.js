@@ -185,19 +185,67 @@ export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
   return { ok: true, dist, hrs, heading, t1, worst, violations };
 }
 
+// No-cruise hours, in the phone's local time: { start, end } in minutes after
+// midnight; start later than end means overnight (e.g. 18:00 to 08:00).
+function quietOn(quiet) {
+  return !!quiet && quiet.start !== quiet.end;
+}
+export function isQuiet(quiet, t) {
+  if (!quietOn(quiet)) return false;
+  const d = new Date(t * 1000);
+  const m = d.getHours() * 60 + d.getMinutes();
+  return quiet.start > quiet.end ? m >= quiet.start || m < quiet.end : m >= quiet.start && m < quiet.end;
+}
+// The next time after t that the clock reads `minutes` after midnight.
+function nextClock(t, minutes) {
+  const d = new Date(t * 1000);
+  d.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  if (d.getTime() / 1000 <= t) d.setDate(d.getDate() + 1);
+  return d.getTime() / 1000;
+}
+// Whether being underway from t0 to t1 runs into no-cruise hours.
+function runsIntoQuiet(quiet, t0, t1) {
+  return quietOn(quiet) && (isQuiet(quiet, t0) || nextClock(t0, quiet.start) < t1);
+}
+
 // Time-dependent search over the lattice for one departure time.
 // cost = hours underway + comfort penalty for running close to the limits.
+// With no-cruise hours set, the route is planned one stretch at a time between
+// the captain's waypoints; a stretch that can't be finished before the
+// no-cruise hours start waits at the waypoint until they end (an overnight stop).
 export function planRoute(grid, forecast, departT, vessel, opts = {}) {
+  const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0, quiet: 0 };
+  const quiet = opts.relaxed ? null : vessel.quiet;
+  const cuts = [0];
+  grid.layers.forEach((l, i) => i > 0 && i < grid.layers.length - 1 && l[0].via && cuts.push(i));
+  cuts.push(grid.layers.length - 1);
+  const legs = [];
+  let t = departT;
+  for (let s = 0; s < cuts.length - 1; s++) {
+    const layers = grid.layers.slice(cuts[s], cuts[s + 1] + 1);
+    let part = planStretch(layers, forecast, t, vessel, opts, stats, quiet);
+    if (!part && s > 0 && quietOn(quiet)) {
+      const morning = nextClock(t, quiet.end);
+      part = planStretch(layers, forecast, morning, vessel, opts, stats, quiet);
+      if (part) part.legs[0].stopFrom = t;
+    }
+    if (!part) return { ok: false, stats };
+    legs.push(...part.legs);
+    t = part.t;
+  }
+  return summarize(legs, departT);
+}
+
+function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
   const maxJump = opts.maxJump ?? 2;
   const edgeOk = opts.edgeOk || (() => true); // e.g. depth: false for edges known to be too shallow
   const comfort = opts.comfortWeight ?? 0.6;
   const relaxed = !!opts.relaxed;
   const labels = new Map();
-  const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0 };
-  labels.set(grid.layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
-  for (let i = 0; i < grid.layers.length - 1; i++) {
-    const next = grid.layers[i + 1];
-    for (const a of grid.layers[i]) {
+  labels.set(layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
+  for (let i = 0; i < layers.length - 1; i++) {
+    const next = layers[i + 1];
+    for (const a of layers[i]) {
       const la = labels.get(a.id);
       if (!la) continue;
       for (const b of next) {
@@ -220,6 +268,10 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
           stats[r.reason]++;
           continue;
         }
+        if (runsIntoQuiet(quiet, la.t, r.t1)) {
+          stats.quiet++;
+          continue;
+        }
         if (shallow) r.violations.unshift(shallow);
         const ratio = r.worst ? r.worst.ratio : 0;
         // Relaxed: going over a limit costs far more than any detour.
@@ -232,12 +284,12 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
       }
     }
   }
-  const destNode = grid.layers[grid.layers.length - 1][0];
+  const destNode = layers[layers.length - 1][0];
   const end = labels.get(destNode.id);
-  if (!end) return { ok: false, stats };
+  if (!end) return null;
   const legs = [];
   for (let n = destNode, l = end; l.leg; n = l.prev, l = labels.get(n.id)) legs.unshift(l.leg);
-  return summarize(legs, departT);
+  return { legs, t: end.t };
 }
 
 // Follow the direct line (centre lane) without any routing, for comparison.
@@ -263,7 +315,9 @@ function summarize(legs, departT) {
   const arriveT = legs.length ? legs[legs.length - 1].t1 : departT;
   const maxRatio = legs.reduce((m, l) => Math.max(m, l.worst ? l.worst.ratio : 0), 0);
   const violations = legs.flatMap((l) => l.violations || []);
-  return { ok: true, legs: mergeLegs(legs), distanceNm: distance, departT, arriveT, maxRatio, violations };
+  const underwayHrs = legs.reduce((s, l) => s + l.hrs, 0);
+  const stops = legs.filter((l) => l.stopFrom).length;
+  return { ok: true, legs: mergeLegs(legs), distanceNm: distance, departT, arriveT, maxRatio, violations, underwayHrs, stops };
 }
 
 // Join consecutive legs that hold the same heading so the waypoint list reads
@@ -290,7 +344,8 @@ function mergeLegs(legs) {
 // Try every departure hour the forecast covers and report when the passage
 // can be made within the limits.
 //   slots:   one per hour, status 'go' | 'nogo' | 'unknown' (arrival would be
-//            past the end of the forecast, so it can't be judged yet)
+//            past the end of the forecast, so it can't be judged yet) | 'quiet'
+//            (the weather allows it but it would mean cruising in no-cruise hours)
 //   windows: runs of consecutive 'go' hours, as { start, end } departure times
 //   best:    the 'go' departure with the lowest worst-vs-limit, then the shortest passage
 export function scanDepartures(grid, forecast, vessel, opts = {}) {
@@ -304,8 +359,14 @@ export function scanDepartures(grid, forecast, vessel, opts = {}) {
       slots.push({ t, status: 'unknown' });
       continue;
     }
+    if (isQuiet(vessel.quiet, t)) {
+      slots.push({ t, status: 'quiet' });
+      continue;
+    }
     const route = planRoute(grid, forecast, t, vessel, opts);
-    slots.push(route.ok ? { t, status: 'go', route } : { t, status: route.stats.beyond && !route.stats.seas && !route.stats.wind && !route.stats.steep ? 'unknown' : 'nogo' });
+    if (route.ok) slots.push({ t, status: 'go', route });
+    else if (route.stats.quiet && planRoute(grid, forecast, t, { ...vessel, quiet: null }, opts).ok) slots.push({ t, status: 'quiet' });
+    else slots.push({ t, status: route.stats.beyond && !route.stats.seas && !route.stats.wind && !route.stats.steep ? 'unknown' : 'nogo' });
   }
   const windows = [];
   for (const sl of slots) {

@@ -1,4 +1,4 @@
-import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath } from './router.js';
+import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet } from './router.js';
 import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, COASTAL_NM } from './depth.js';
 import { providers } from './providers.js';
 import { formatLatLon } from './geo.js';
@@ -18,6 +18,9 @@ const DEFAULTS = {
   minDepthFt: 6,
   steepHsFt: 6,
   steepPeriodS: 6,
+  quietOn: false,
+  quietStart: '18:00',
+  quietEnd: '08:00',
   provider: 'open-meteo',
 };
 
@@ -83,9 +86,11 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'provider']) {
+  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider']) {
     form.elements[k].value = settings[k];
   }
+  form.elements.quietOn.checked = !!settings.quietOn;
+  showQuietTimes();
   settings.limitsFt.forEach((v, i) => (form.elements[`limit${i}`].value = v));
   settings.windLimitsKt.forEach((v, i) => (form.elements[`wind${i}`].value = v));
   drawDiagrams(settings);
@@ -102,12 +107,31 @@ function readForm() {
     speedKt: num('speedKt'),
     steepHsFt: num('steepHsFt'),
     steepPeriodS: num('steepPeriodS'),
+    quietOn: form.elements.quietOn.checked,
+    quietStart: form.elements.quietStart.value || DEFAULTS.quietStart,
+    quietEnd: form.elements.quietEnd.value || DEFAULTS.quietEnd,
     provider: form.elements.provider.value,
     limitsFt: SECTORS.map((_, i) => Number(form.elements[`limit${i}`].value)),
     windLimitsKt: SECTORS.map((_, i) => Number(form.elements[`wind${i}`].value)),
   };
 }
 form.addEventListener('input', () => drawDiagrams(readForm()));
+function showQuietTimes() {
+  const on = form.elements.quietOn.checked;
+  $('quietTimes').hidden = !on;
+  form.elements.quietStart.required = form.elements.quietEnd.required = on;
+}
+form.elements.quietOn.addEventListener('change', showQuietTimes);
+
+// No-cruise hours as the planner wants them, or null when off.
+const toMinutes = (hhmm) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + (m || 0);
+};
+function quietHours(s = settings) {
+  return s.quietOn ? { start: toMinutes(s.quietStart), end: toMinutes(s.quietEnd) } : null;
+}
+const quietText = (s = settings) => `${s.quietStart} to ${s.quietEnd}`;
 form.addEventListener('submit', (e) => {
   e.preventDefault();
   settings = readForm();
@@ -296,6 +320,7 @@ function clearRoute() {
   state.layers.forEach((l) => map.removeLayer(l));
   state.layers = [];
   state.plan = null;
+  state.lastScan = null;
   $('result').innerHTML = '';
 }
 function showError(msg) {
@@ -324,6 +349,7 @@ $('btnPlan').onclick = async () => {
     limitsFt: settings.limitsFt,
     windLimitsKt: settings.windLimitsKt,
     steep: { hsFt: Number(settings.steepHsFt), periodS: Number(settings.steepPeriodS) },
+    quiet: quietHours(),
   };
   const provider = providers[settings.provider] || providers['open-meteo'];
   $('btnPlan').disabled = true;
@@ -374,13 +400,17 @@ $('btnPlan').onclick = async () => {
     } else {
       const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
       progress('Working out which limits are in the way…');
-      const least = await leastBadRoute(grid, forecast, departT, vessel);
-      renderNoRoute(route, later, forecast, least);
+      // Would the weather allow it if not for the no-cruise hours?
+      const free = vessel.quiet && route.stats.quiet ? planRoute(grid, forecast, departT, { ...vessel, quiet: null }, { edgeOk: state.depthChecker?.edgeOk }) : null;
+      const quietOnly = free?.ok ? free : null;
+      const least = quietOnly ? null : await leastBadRoute(grid, forecast, departT, vessel);
+      renderNoRoute(route, later, forecast, least, quietOnly, departT);
       if (later) drawRoute(later, true);
       drawProblems(least);
       state.plan = { route: later, departT, source: forecast.source, alternative: !!later };
     }
     renderWindows(scan, departT, forecast);
+    recordCheck(scan);
     if (depthNote) $('result').insertAdjacentHTML('afterbegin', `<div class="card bad">${depthNote}</div>`);
   } catch (e) {
     showError(`Could not get the forecast: ${e.message}. Check the connection and try again.`);
@@ -430,7 +460,7 @@ function renderWindows(scan, departT, forecast) {
   const span = slots[slots.length - 1].t + scan.step - t0;
   const pct = (t) => (((t - t0) / span) * 100).toFixed(2);
   const bar = slots
-    .map((sl) => `<div class="slot ${sl.status}" style="left:${pct(sl.t)}%;width:${((scan.step / span) * 100).toFixed(2)}%" data-t="${sl.t}" title="${fmtTime(sl.t)}: ${{ go: 'within limits', nogo: 'outside limits', unknown: 'beyond forecast' }[sl.status]}"></div>`)
+    .map((sl) => `<div class="slot ${sl.status}" style="left:${pct(sl.t)}%;width:${((scan.step / span) * 100).toFixed(2)}%" data-t="${sl.t}" title="${fmtTime(sl.t)}: ${{ go: 'within limits', nogo: 'outside limits', unknown: 'beyond forecast', quiet: 'no-cruise hours' }[sl.status]}"></div>`)
     .join('');
   // Midnight ticks with day names.
   let ticks = '';
@@ -447,7 +477,7 @@ function renderWindows(scan, departT, forecast) {
     : `<p>No departure in the forecast keeps the passage within your limits.</p>`;
   const unknownFrom = slots.find((sl) => sl.status === 'unknown');
   const bestHtml = best
-    ? `<p><strong>Best departure: ${fmtTime(best.departT)}</strong>, arriving ${fmtTime(best.arriveT)} (${fmtDur((best.arriveT - best.departT) / 3600)}, worst ${Math.round(best.maxRatio * 100)}% of your limits).</p>
+    ? `<p><strong>Best departure: ${fmtTime(best.departT)}</strong>, arriving ${fmtTime(best.arriveT)} (${fmtDur((best.arriveT - best.departT) / 3600)}${best.stops ? ` including ${best.stops === 1 ? 'an overnight stop' : `${best.stops} overnight stops`}` : ''}, worst ${Math.round(best.maxRatio * 100)}% of your limits).</p>
        <button class="btn" id="btnUseBest">Use best departure</button>`
     : '';
   $('result').insertAdjacentHTML(
@@ -455,7 +485,7 @@ function renderWindows(scan, departT, forecast) {
     `<div class="card"><h3>When can you go?</h3>
       <p class="note">Each hour you could leave, checked against your limits for the whole passage. Tap a green hour to plan that departure.</p>
       <div class="timeline">${bar}${ticks}${marker}</div>
-      <div class="legend"><span><i class="go"></i>Within limits</span><span><i class="nogo"></i>Outside limits</span><span><i class="unknown"></i>Forecast too short</span></div>
+      <div class="legend"><span><i class="go"></i>Within limits</span><span><i class="nogo"></i>Outside limits</span><span><i class="unknown"></i>Forecast too short</span>${slots.some((sl) => sl.status === 'quiet') ? '<span><i class="quiet"></i>Would cruise in your no-cruise hours</span>' : ''}</div>
       <h4>Departure windows</h4>${list}${bestHtml}
       ${unknownFrom ? `<p class="note">Departures from ${fmtTime(unknownFrom.t)} on would arrive after the forecast ends (${fmtTime(forecast.times[forecast.times.length - 1])}), so they can't be judged yet.</p>` : ''}
     </div>`
@@ -529,7 +559,10 @@ function legsTable(route) {
       const dep = state.depthChecker?.legShallowest(l);
       const near = state.depthChecker?.legCoastal(l) ? ', near shore' : '';
       const depth = dep != null ? `<br><small>shallowest ${Math.round(dep)} ft${near}</small>` : '';
-      return `<tr><td>${pointLabel(l.from, i, false)}<br><small>${formatLatLon(l.from)}</small></td>
+      const stop = l.stopFrom
+        ? `<tr class="stop"><td colspan="4">Overnight stop at ${pointLabel(l.from, i, false).toLowerCase()}: arrive ${fmtTime(l.stopFrom)}, leave ${fmtTime(l.t0)}</td></tr>`
+        : '';
+      return `${stop}<tr><td>${pointLabel(l.from, i, false)}<br><small>${formatLatLon(l.from)}</small></td>
         <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
     .join('');
@@ -541,7 +574,8 @@ function legsTable(route) {
 function summaryStats(route) {
   return `<div class="stats">
     <div class="stat"><div class="k">Distance</div><div class="v">${route.distanceNm.toFixed(1)} nm</div></div>
-    <div class="stat"><div class="k">Time underway</div><div class="v">${fmtDur((route.arriveT - route.departT) / 3600)}</div></div>
+    <div class="stat"><div class="k">Time underway</div><div class="v">${fmtDur(route.underwayHrs ?? (route.arriveT - route.departT) / 3600)}</div></div>
+    ${route.stops ? `<div class="stat"><div class="k">Overnight stops</div><div class="v">${route.stops}</div></div>` : ''}
     <div class="stat"><div class="k">Arrive</div><div class="v">${fmtTime(route.arriveT)}</div></div>
     <div class="stat"><div class="k">Worst vs. limit</div><div class="v">${Math.round(route.maxRatio * 100)}%</div></div>
     ${shallowestStat(route)}
@@ -664,10 +698,14 @@ function drawProblems(least) {
   }
 }
 
-function renderNoRoute(route, later, forecast, least) {
+function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
   const st = route.stats;
   const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas'].filter(Boolean);
-  const why = hit.length
+  const why = quietOnly
+    ? isQuiet(quietHours(), quietOnly.departT)
+      ? `the departure time is inside your no-cruise hours (${quietText()})`
+      : `the passage takes about ${fmtDur(quietOnly.underwayHrs)} underway and can't be finished before your no-cruise hours start at ${settings.quietStart}${activeVia().length ? '' : '. Leave earlier, or add your own waypoints where you can anchor; the route will stop there overnight and go on the next morning'}`
+    : hit.length
     ? `every candidate path runs into ${hit.join(' or ')} beyond your limits`
     : st.shallow
       ? `every candidate path crosses water shallower than your ${settings.minDepthFt} ft minimum`
@@ -676,8 +714,9 @@ function renderNoRoute(route, later, forecast, least) {
       : state.depthChecker
         ? `no water path deep enough (${settings.minDepthFt} ft) was found between the two points. If you're starting or finishing up a narrow or winding river, the planner can't follow the channel yet; set that end at the river mouth or inlet and try again`
         : 'no open-water path was found between the two points. Water depth could not be checked, so rivers and other water without a sea forecast could not be used';
-  const detail = least?.ok && least.violations.length ? explainViolations(least) : '';
-  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.</p>${detail}</div>`;
+  const detail = !quietOnly && least?.ok && least.violations.length ? explainViolations(least) : '';
+  const alsoQuiet = !quietOnly && isQuiet(quietHours(), departT) ? ` This departure time is also inside your no-cruise hours (${quietText()}).` : '';
+  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.${alsoQuiet}</p>${detail}</div>`;
   if (later) {
     html += `<div class="card"><h3>Earliest workable departure: ${fmtTime(later.departT)}</h3>
       ${summaryStats(later)}${legsTable(later)}
@@ -737,6 +776,129 @@ $('btnClear').onclick = () => {
   setWantVia(false);
 };
 
+// ---------- Saved routes ----------
+// Start, waypoints and destination are kept on this phone so a passage can be
+// checked again against later forecasts. Each check's best departure is kept
+// with the route to show whether conditions are getting better or worse.
+const ROUTES = 'wxrouter.routes.v1';
+const MAX_CHECKS = 10;
+
+function loadRoutes() {
+  try {
+    return JSON.parse(localStorage.getItem(ROUTES) || '[]');
+  } catch {
+    return [];
+  }
+}
+function saveRoutes(list) {
+  try {
+    localStorage.setItem(ROUTES, JSON.stringify(list));
+  } catch {}
+}
+const roundPt = (p) => ({ lat: Math.round(p.lat * 1e5) / 1e5, lon: Math.round(p.lon * 1e5) / 1e5 });
+const routeKey = (start, via, dest) => JSON.stringify([start, ...via, dest].map(roundPt));
+const currentKey = () => (state.start && state.dest ? routeKey(state.start, activeVia(), state.dest) : null);
+
+$('btnSave').onclick = () => {
+  if (!state.start || !state.dest) return showError('Set a start and a destination before saving the route.');
+  const list = loadRoutes();
+  const key = currentKey();
+  const existing = list.find((r) => routeKey(r.start, r.via, r.dest) === key);
+  const name = prompt('Name for this route', existing?.name || `Route ${list.length + 1}`);
+  if (name == null) return;
+  if (existing) existing.name = name.trim() || existing.name;
+  else {
+    list.push({
+      id: Date.now().toString(36),
+      name: name.trim() || `Route ${list.length + 1}`,
+      start: roundPt(state.start),
+      via: activeVia().map(roundPt),
+      dest: roundPt(state.dest),
+      savedAt: Math.floor(Date.now() / 1000),
+      checks: [],
+    });
+  }
+  saveRoutes(list);
+  if (state.lastScan) recordCheck(state.lastScan);
+  renderSaved();
+  $('savedBox').open = true;
+};
+
+// After each plan: if this is a saved route, remember what the forecast allowed.
+function recordCheck(scan) {
+  state.lastScan = scan;
+  const list = loadRoutes();
+  const r = list.find((x) => routeKey(x.start, x.via, x.dest) === currentKey());
+  if (!r) return;
+  const b = scan.best;
+  r.checks.push({
+    at: Math.floor(Date.now() / 1000),
+    goHours: scan.slots.filter((sl) => sl.status === 'go').length,
+    quietHours: scan.slots.filter((sl) => sl.status === 'quiet').length,
+    best: b ? { departT: b.departT, arriveT: b.arriveT, maxRatio: b.maxRatio } : null,
+  });
+  r.checks = r.checks.slice(-MAX_CHECKS);
+  saveRoutes(list);
+  renderSaved();
+}
+
+function describeCheck(c) {
+  if (!c) return 'Not checked yet.';
+  const when = `Checked ${fmtTime(c.at)}: `;
+  if (!c.best) return when + (c.quietHours ? 'no departure fits both your limits and your cruising hours in the forecast.' : 'no departure within your limits in the forecast.');
+  return when + `best departure ${fmtTime(c.best.departT)} (worst ${Math.round(c.best.maxRatio * 100)}% of limits), ${c.goHours} workable departure hour${c.goHours === 1 ? '' : 's'}.`;
+}
+// Better or worse than the check before, by the number of workable hours and how close to the limits.
+function trend(checks) {
+  const [a, b] = checks.slice(-2);
+  if (!a || !b) return '';
+  const score = (c) => (c.best ? 1 + c.goHours / 200 - c.best.maxRatio / 2 : 0);
+  const d = score(b) - score(a);
+  return Math.abs(d) < 0.02 ? 'About the same as the check before.' : d > 0 ? 'Better than the check before.' : 'Worse than the check before.';
+}
+
+function renderSaved() {
+  const list = loadRoutes();
+  $('savedCount').textContent = list.length;
+  $('savedList').innerHTML = list.length
+    ? list
+        .map((r) => {
+          const last = r.checks[r.checks.length - 1];
+          const stops = r.via.length ? ` · ${r.via.length} waypoint${r.via.length === 1 ? '' : 's'}` : '';
+          return `<li><div class="name">${escapeHtml(r.name)}</div>
+            <div class="meta">${formatLatLon(r.start)} to ${formatLatLon(r.dest)}${stops}<br>${describeCheck(last)} ${trend(r.checks)}</div>
+            <div class="acts"><button class="btn" data-check="${r.id}">Check now</button><button class="btn" data-del="${r.id}">Delete</button></div></li>`;
+        })
+        .join('')
+    : '<li class="meta">No saved routes yet. Set up a route, then tap Save this route.</li>';
+  $('savedList').querySelectorAll('[data-check]').forEach((b) => (b.onclick = () => openSaved(b.dataset.check)));
+  $('savedList').querySelectorAll('[data-del]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const r = list.find((x) => x.id === b.dataset.del);
+        if (!r || !confirm(`Delete the saved route "${r.name}"?`)) return;
+        saveRoutes(list.filter((x) => x !== r));
+        renderSaved();
+      })
+  );
+}
+
+// Load a saved route and plan it from the next hour, so the departure windows
+// show every time the latest forecast allows.
+function openSaved(id) {
+  const r = loadRoutes().find((x) => x.id === id);
+  if (!r) return;
+  setPicking(null);
+  state.via = r.via.map((p) => ({ ...p }));
+  setWantVia(state.via.length > 0);
+  setPoint('start', r.start);
+  setPoint('dest', r.dest);
+  fitPoints();
+  setDepart(Math.ceil(Date.now() / 3600000) * 3600);
+  $('btnPlan').click();
+  $('result').scrollIntoView?.({ behavior: 'smooth' });
+}
+
 // ---------- Print ----------
 $('btnPrint').onclick = () => {
   $('printReport').innerHTML = buildReport();
@@ -761,6 +923,7 @@ function buildReport() {
       <tr><td>Minimum water depth</td><td>${v(s.minDepthFt, 'ft')}</td></tr>
       <tr><td>Cruise speed</td><td>${v(s.speedKt, 'kt')}</td></tr>
       <tr><td>Steep, short seas</td><td>avoid waves over ${s.steepHsFt} ft at ${s.steepPeriodS} s or less</td></tr>
+      <tr><td>No-cruise hours</td><td>${s.quietOn ? quietText(s) : 'none'}</td></tr>
       <tr><td>Forecast source</td><td>${escapeHtml(provider)}</td></tr>
     </table>
     <h3>Limits by direction off the bow</h3>
@@ -816,6 +979,7 @@ $('btnReturn').onclick = () => ($('exitScreen').hidden = true);
 // ---------- Start up ----------
 fillForm();
 updateBadge();
+renderSaved();
 try {
   if (!localStorage.getItem(STORE)) showView('settingsView');
 } catch {}
