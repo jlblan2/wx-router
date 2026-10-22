@@ -1,13 +1,17 @@
 import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet } from './router.js';
 import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, COASTAL_NM } from './depth.js';
 import { providers } from './providers.js';
-import { formatLatLon } from './geo.js';
+import { formatLatLon, distanceNm } from './geo.js';
+import { findHavens, SEARCH_NM } from './havens.js';
 
 const $ = (id) => document.getElementById(id);
 const STORE = 'wxrouter.settings.v1';
 
 const DEFAULTS = {
   name: '',
+  vesselType: 'motor',
+  noGoDeg: 45,
+  noGoWindKt: 8,
   lengthFt: '',
   freeboardFt: '',
   draftFt: '',
@@ -69,7 +73,7 @@ function showView(id) {
 function updateBadge() {
   const s = settings;
   $('vesselBadge').textContent = s.name
-    ? `${s.name}${s.lengthFt ? ` · ${s.lengthFt}′` : ''} · ${s.speedKt} kt`
+    ? `${s.vesselType === 'sail' ? '⛵ ' : ''}${s.name}${s.lengthFt ? ` · ${s.lengthFt}′` : ''} · ${s.speedKt} kt`
     : '';
 }
 
@@ -87,11 +91,12 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
+  for (const k of ['name', 'vesselType', 'noGoDeg', 'noGoWindKt', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
     form.elements[k].value = settings[k];
   }
   form.elements.quietOn.checked = !!settings.quietOn;
   showQuietTimes();
+  showSailOpts();
   settings.limitsFt.forEach((v, i) => (form.elements[`limit${i}`].value = v));
   settings.windLimitsKt.forEach((v, i) => (form.elements[`wind${i}`].value = v));
   drawDiagrams(settings);
@@ -100,6 +105,9 @@ function readForm() {
   const num = (k) => (form.elements[k].value === '' ? '' : Number(form.elements[k].value));
   return {
     name: form.elements.name.value.trim(),
+    vesselType: form.elements.vesselType.value,
+    noGoDeg: num('noGoDeg'),
+    noGoWindKt: num('noGoWindKt'),
     lengthFt: num('lengthFt'),
     freeboardFt: num('freeboardFt'),
     draftFt: num('draftFt'),
@@ -124,6 +132,13 @@ function showQuietTimes() {
   form.elements.quietStart.required = form.elements.quietEnd.required = on;
 }
 form.elements.quietOn.addEventListener('change', showQuietTimes);
+function showSailOpts() {
+  const sail = form.elements.vesselType.value === 'sail';
+  $('sailOpts').hidden = $('sailNote').hidden = !sail;
+  form.elements.noGoDeg.required = form.elements.noGoWindKt.required = sail;
+}
+form.elements.vesselType.addEventListener('change', showSailOpts);
+const isSail = () => settings.vesselType === 'sail';
 
 // No-cruise hours as the planner wants them, or null when off.
 const toMinutes = (hhmm) => {
@@ -352,6 +367,7 @@ $('btnPlan').onclick = async () => {
     windLimitsKt: settings.windLimitsKt,
     steep: { hsFt: Number(settings.steepHsFt), periodS: Number(settings.steepPeriodS) },
     quiet: quietHours(),
+    sail: isSail() ? { noGoDeg: Number(settings.noGoDeg), minWindKt: Number(settings.noGoWindKt) } : null,
   };
   const provider = providers[settings.provider] || providers['open-meteo'];
   $('btnPlan').disabled = true;
@@ -413,6 +429,7 @@ $('btnPlan').onclick = async () => {
     }
     renderWindows(scan, departT, forecast);
     recordCheck(scan);
+    showHavens(state.plan.route || null, departT, provider);
     if (depthNote) $('result').insertAdjacentHTML('afterbegin', `<div class="card bad">${depthNote}</div>`);
   } catch (e) {
     showError(`Could not get the forecast: ${escapeHtml(e.message)}.${/request limit/.test(e.message) ? '' : ' Check the connection and try again.'}`);
@@ -614,6 +631,8 @@ function renderRoute(route, direct, source, directShallow = false) {
   } else if (!direct.ok && direct.reason === 'wind') {
     const w = direct.worst;
     cmp = `<p class="note">The direct line would put ${Math.round(w.windKt)} kt of wind ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit} kt), so this route goes around it.</p>`;
+  } else if (!direct.ok && direct.reason === 'beat') {
+    cmp = `<p class="note">The direct line points too close to the wind to sail, so this route reaches across it instead.</p>`;
   } else if (!direct.ok && direct.reason === 'land') {
     cmp = `<p class="note">The direct line crosses land or water too close to shore for the forecast, so this route goes around it.</p>`;
   } else if (direct.ok) {
@@ -662,7 +681,7 @@ function explainViolations(least) {
       if (v.over > g.over) Object.assign(g, v, { count: g.count });
     }
   }
-  const order = { depth: 0, steep: 1, seas: 2, wind: 3 };
+  const order = { depth: 0, steep: 1, seas: 2, wind: 3, beat: 4 };
   const where = (v) => (v.at ? ` near ${formatLatLon(v.at)}` : '');
   const when = (v) => (v.kind === 'depth' ? '' : `, ${fmtTime(v.t)}`);
   const items = [...groups.values()]
@@ -673,6 +692,9 @@ function explainViolations(least) {
       }
       if (v.kind === 'wind') {
         return `<li><strong>Wind ${SECTORS[v.sector].short}:</strong> ${Math.round(v.value)} kt against your ${v.limit} kt limit, <strong>${Math.round(v.value - v.limit)} kt over</strong>${where(v)}${when(v)}.</li>`;
+      }
+      if (v.kind === 'beat') {
+        return `<li><strong>Too close to the wind to sail:</strong> heading ${Math.round(v.value)}° off a ${Math.round(v.windKt)} kt wind, inside your ${v.limit}° limit${where(v)}${when(v)}.</li>`;
       }
       if (v.kind === 'steep') {
         return `<li><strong>Steep, short seas:</strong> ${v.value.toFixed(1)} ft waves ${Math.round(v.periodS)} seconds apart, over your ${v.limit} ft at ${settings.steepPeriodS} s rule by <strong>${(v.value - v.limit).toFixed(1)} ft</strong>${where(v)}${when(v)}.</li>`;
@@ -691,7 +713,7 @@ function drawProblems(least) {
   state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
   for (const v of least.violations) {
     if (!v.at) continue;
-    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow' }[v.kind];
+    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind' }[v.kind];
     state.layers.push(
       L.circleMarker([v.at.lat, v.at.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#c0392b', fillOpacity: 0.9 })
         .bindTooltip(label)
@@ -702,7 +724,7 @@ function drawProblems(least) {
 
 function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
   const st = route.stats;
-  const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas'].filter(Boolean);
+  const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas', st.beat && 'headings too close to the wind to sail'].filter(Boolean);
   const why = quietOnly
     ? isQuiet(quietHours(), quietOnly.departT)
       ? `the departure time is inside your no-cruise hours (${quietText()})`
@@ -777,6 +799,123 @@ $('btnClear').onclick = () => {
   state.via = [];
   setWantVia(false);
 };
+
+// ---------- Safe havens ----------
+// Harbours and anchorages within reach of the route, listed under it and
+// marked on the chart. Runs after the route is shown, so it never holds it up.
+function routePoints(route, departT) {
+  if (route) return [{ ...route.legs[0].from, t: route.legs[0].t0 }, ...route.legs.map((l) => ({ lat: l.to.lat, lon: l.to.lon, t: l.t1 }))];
+  // No workable route: the straight line through the captain's points.
+  const pts = [state.start, ...activeVia(), state.dest];
+  let t = departT;
+  return pts.map((p, i) => {
+    if (i) t += (distanceNm(pts[i - 1], p) / Number(settings.speedKt)) * 3600;
+    return { lat: p.lat, lon: p.lon, t };
+  });
+}
+
+// High-resolution depths around each anchorage for finding the shore, falling
+// back to the standard depths.
+const havenDepth = (provider) =>
+  provider.id === 'demo'
+    ? demoDepth
+    : {
+        async getDepthsFt(pts) {
+          try {
+            return await noaaCoastalDepth.getDepthsFt(pts);
+          } catch {
+            return noaaDepth.getDepthsFt(pts);
+          }
+        },
+      };
+
+
+async function showHavens(route, departT, provider) {
+  const run = (state.havenRun = (state.havenRun || 0) + 1);
+  $('result').insertAdjacentHTML(
+    'beforeend',
+    `<div class="card havens" id="havensCard"><h3>Safe havens near the route</h3><p class="note" id="havensMsg">Looking for harbours and anchorages within ${SEARCH_NM} nm…</p></div>`
+  );
+  try {
+    const res = await findHavens(routePoints(route, departT), {
+      depthSource: havenDepth(provider),
+      provider,
+      apiKey: settings.openMeteoKey,
+      minDepthFt: Number(settings.minDepthFt),
+      onProgress: (m) => run === state.havenRun && $('havensMsg') && ($('havensMsg').textContent = m),
+    });
+    if (run !== state.havenRun || !$('havensCard')) return; // the route changed meanwhile
+    renderHavens(res);
+  } catch (e) {
+    if (run !== state.havenRun || !$('havensCard')) return;
+    $('havensMsg').textContent = `Couldn't look up harbours and anchorages (${e.message}). Try planning again later.`;
+  }
+}
+
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+const levelColor = { High: '#2e8b57', Medium: '#d08a00', Low: '#c0392b' };
+
+function renderHavens({ ports, anchorages, excluded }) {
+  const label = (h) => escapeHtml(h.name || (h.kind === 'port' ? 'Unnamed harbour' : 'Unnamed anchorage'));
+  const where = (h) => `${h.off < 0.5 ? 'On the route' : `${h.off.toFixed(1)} nm off the route`}, ${Math.round(h.along)} nm along`;
+  const cat = (h) => (h.category ? ` <small>(${escapeHtml(h.category.replace(/_/g, ' '))})</small>` : '');
+  const add = (h) => `<button class="btn small" data-haven="${h.id}">Add as waypoint</button>`;
+  const portHtml = ports.length
+    ? `<ul class="havens-list">${ports.map((h) => `<li><strong>${label(h)}</strong>${cat(h)}<br><small>${where(h)}</small> ${add(h)}</li>`).join('')}</ul>`
+    : `<p class="note">No charted harbours or marinas within ${SEARCH_NM} nm.</p>`;
+  const anchHtml = anchorages.length
+    ? `<ul class="havens-list">${anchorages
+        .map(
+          (h) => `<li><strong>${label(h)}</strong>${cat(h)} <span class="conf" style="background:${levelColor[h.level]}">${h.level} confidence</span><br>
+          <small>${where(h)}. ${escapeHtml(cap(h.reasons.join('; ')))}. Judged for ${fmtTime(h.stayFrom)} to 12 h later.</small> ${add(h)}</li>`
+        )
+        .join('')}</ul>`
+    : `<p class="note">No charted anchorages within ${SEARCH_NM} nm that stay off a lee shore in the forecast.</p>`;
+  const exHtml = excluded.length
+    ? `<details><summary>${excluded.length} anchorage${excluded.length === 1 ? '' : 's'} left out</summary><ul class="havens-list">${excluded
+        .map((h) => `<li>${label(h)}: ${escapeHtml(h.reason)}</li>`)
+        .join('')}</ul></details>`
+    : '';
+  $('havensCard').innerHTML = `<h3>Safe havens near the route</h3>
+    <h4>Safe haven ports</h4>${portHtml}
+    <h4>Anchorages</h4>${anchHtml}${exHtml}
+    <p class="note">Harbours and anchorages come from OpenSeaMap chart data. Anchorages on a lee shore (open water upwind and the shore close downwind in 10 kt or more of forecast wind) are left out. Confidence weighs shelter from the forecast wind over a 12 hour stay from when you'd reach it, how far ahead the forecast is, and the depth data. Always confirm on a chart and with local knowledge.</p>`;
+  const byId = new Map([...ports, ...anchorages].map((h) => [h.id, h]));
+  $('havensCard').querySelectorAll('[data-haven]').forEach((b) => (b.onclick = () => addHavenAsWaypoint(byId.get(b.dataset.haven))));
+  for (const h of [...ports, ...anchorages]) {
+    const color = h.kind === 'port' ? '#1f7a99' : levelColor[h.level];
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="haven-pin" style="background:${color}">${h.kind === 'port' ? 'H' : '⚓'}</div>`,
+      iconSize: [22, 22],
+      iconAnchor: [11, 11],
+    });
+    state.layers.push(
+      L.marker([h.lat, h.lon], { icon })
+        .bindTooltip(`${label(h)}${h.level ? ` · ${h.level} confidence` : ''}`)
+        .addTo(map)
+    );
+  }
+}
+
+// Put the haven into the waypoint list where it adds the least distance.
+function addHavenAsWaypoint(h) {
+  if (!h) return;
+  const p = { lat: h.lat, lon: h.lon };
+  const via = activeVia();
+  const pts = [state.start, ...via, state.dest];
+  let bestI = 0;
+  let bestAdd = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const add = distanceNm(pts[i], p) + distanceNm(p, pts[i + 1]) - distanceNm(pts[i], pts[i + 1]);
+    if (add < bestAdd) [bestAdd, bestI] = [add, i];
+  }
+  state.via = [...via];
+  state.via.splice(bestI, 0, p);
+  setWantVia(true);
+  fitPoints();
+  $('result').innerHTML = `<div class="card">${escapeHtml(h.name || (h.kind === 'port' ? 'That harbour' : 'That anchorage'))} is now waypoint ${bestI + 1}. Tap <strong>Plan route</strong> to plan through it.</div>`;
+}
 
 // ---------- Saved routes ----------
 // Start, waypoints and destination are kept on this phone so a passage can be
@@ -919,6 +1058,7 @@ function buildReport() {
     <h2>Vessel settings</h2>
     <table class="kv">
       <tr><td>Vessel name</td><td>${escapeHtml(s.name || '–')}</td></tr>
+      <tr><td>Vessel type</td><td>${s.vesselType === 'sail' ? `Sail (no closer than ${s.noGoDeg}° to the wind once it reaches ${s.noGoWindKt} kt)` : 'Motor'}</td></tr>
       <tr><td>Length</td><td>${v(s.lengthFt, 'ft')}</td></tr>
       <tr><td>Freeboard</td><td>${v(s.freeboardFt, 'ft')}</td></tr>
       <tr><td>Draft</td><td>${v(s.draftFt, 'ft')}</td></tr>

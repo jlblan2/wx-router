@@ -60,6 +60,23 @@ Entering an Open-Meteo subscription key in Settings switches to Open-Meteo's
 subscriber servers (customer-api / customer-marine-api), which have no daily or
 per-minute limit, and turns pacing off.
 
+## Vessel type
+Settings > Vessel type is Motor or Sail. For sail, legs pointing closer to the wind
+than a set angle (default 45°), once the wind reaches a set speed (default 8 kt), are
+avoided, so the route tacks or reaches instead of heading straight upwind. Legs leaving
+the start and reaching the destination are exempt, since those are usually motored.
+
+## Safe havens and anchorages
+After each plan, Wx Router lists harbours, marinas and anchorages within 15 nm of the
+route from OpenSeaMap chart data (via the Overpass API), and marks them on the chart.
+Each anchorage is judged for a 12 hour stay from when the boat would get there:
+NOAA high-resolution depths in 16 directions around it give the open water (fetch)
+each way, and the forecast wind for that spot gives the direction and strength. An
+anchorage with open water upwind and the shore within 1 nm downwind in 10 kt or more
+is on a lee shore and is left out (listed separately with the reason). The rest get
+High, Medium or Low confidence from how sheltered they stay, how far ahead the
+forecast is, and the depth data. Any haven can be added as a waypoint.
+
 ## Cruising hours
 Settings > Cruising hours can keep the boat off the water during set hours, for
 example 18:00 until 08:00 (the phone's local time). A departure is only workable if it

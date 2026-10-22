@@ -179,6 +179,15 @@ export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
     }
     if (sea && sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
     if (wind && wind.ratio > 1) found.push({ kind: 'wind', value: s.windKt, limit: wind.limit, sector: wind.sector, over: wind.ratio - 1 });
+    // A sailing vessel can't hold a course this close to the wind once there's
+    // enough of it to sail; it would have to tack or motor.
+    // Not on legs leaving the start or reaching the destination, which are
+    // usually motored in and out of harbour.
+    const sail = (a.fixed && !a.via) || (b.fixed && !b.via) ? null : vessel.sail;
+    if (sail && s.windKt != null && s.windFrom != null && s.windKt >= sail.minWindKt) {
+      const off = relativeAngle(s.windFrom, heading);
+      if (off < sail.noGoDeg) found.push({ kind: 'beat', value: off, limit: sail.noGoDeg, windKt: s.windKt, over: (sail.noGoDeg - off) / sail.noGoDeg });
+    }
     if (found.length && !relaxed) return { ok: false, reason: found[0].kind, dist, hrs, heading, worst: info };
     for (const v of found) violations.push({ ...v, t, at });
   }
@@ -214,7 +223,7 @@ function runsIntoQuiet(quiet, t0, t1) {
 // the captain's waypoints; a stretch that can't be finished before the
 // no-cruise hours start waits at the waypoint until they end (an overnight stop).
 export function planRoute(grid, forecast, departT, vessel, opts = {}) {
-  const stats = { seas: 0, wind: 0, steep: 0, land: 0, beyond: 0, quiet: 0 };
+  const stats = { seas: 0, wind: 0, steep: 0, beat: 0, land: 0, beyond: 0, quiet: 0 };
   const quiet = opts.relaxed ? null : vessel.quiet;
   const cuts = [0];
   grid.layers.forEach((l, i) => i > 0 && i < grid.layers.length - 1 && l[0].via && cuts.push(i));
@@ -237,7 +246,8 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
 }
 
 function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
-  const maxJump = opts.maxJump ?? 2;
+  // Sailing vessels need wider zig-zags to tack upwind.
+  const maxJump = opts.maxJump ?? (vessel.sail ? 4 : 2);
   const edgeOk = opts.edgeOk || (() => true); // e.g. depth: false for edges known to be too shallow
   const comfort = opts.comfortWeight ?? 0.6;
   const relaxed = !!opts.relaxed;
@@ -366,7 +376,7 @@ export function scanDepartures(grid, forecast, vessel, opts = {}) {
     const route = planRoute(grid, forecast, t, vessel, opts);
     if (route.ok) slots.push({ t, status: 'go', route });
     else if (route.stats.quiet && planRoute(grid, forecast, t, { ...vessel, quiet: null }, opts).ok) slots.push({ t, status: 'quiet' });
-    else slots.push({ t, status: route.stats.beyond && !route.stats.seas && !route.stats.wind && !route.stats.steep ? 'unknown' : 'nogo' });
+    else slots.push({ t, status: route.stats.beyond && !route.stats.seas && !route.stats.wind && !route.stats.steep && !route.stats.beat ? 'unknown' : 'nogo' });
   }
   const windows = [];
   for (const sl of slots) {
