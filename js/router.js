@@ -66,6 +66,7 @@ export function buildGrid(start, dest, opts = {}) {
     layer.push(n);
   };
   let total = 0;
+  let userVia = 0;
   for (let s = 0; s < stops.length - 1; s++) {
     const a = stops[s];
     const b = stops[s + 1];
@@ -82,7 +83,10 @@ export function buildGrid(start, dest, opts = {}) {
       const f = i / layersCount;
       const layer = [];
       if (i === layersCount) {
-        addNode(layer, b, 0, true, s < stops.length - 2 ? { via: s + 1 } : {});
+        // The captain's waypoints are numbered; turns added to get around
+        // shallow water (auto) are not.
+        if (s < stops.length - 2) addNode(layer, b, 0, true, b.auto ? { via: true, auto: true } : { via: ++userVia });
+        else addNode(layer, b, 0, true);
       } else {
         const c = interpolate(a, b, f);
         const brg = bearingDeg(c, b);
@@ -226,7 +230,7 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   const stats = { seas: 0, wind: 0, steep: 0, beat: 0, land: 0, beyond: 0, quiet: 0 };
   const quiet = opts.relaxed ? null : vessel.quiet;
   const cuts = [0];
-  grid.layers.forEach((l, i) => i > 0 && i < grid.layers.length - 1 && l[0].via && cuts.push(i));
+  grid.layers.forEach((l, i) => i > 0 && i < grid.layers.length - 1 && l[0].via && !l[0].auto && cuts.push(i));
   cuts.push(grid.layers.length - 1);
   const legs = [];
   let t = departT;

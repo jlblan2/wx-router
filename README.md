@@ -60,6 +60,17 @@ Entering an Open-Meteo subscription key in Settings switches to Open-Meteo's
 subscriber servers (customer-api / customer-marine-api), which have no daily or
 per-minute limit, and turns pacing off.
 
+## Going around shallow water
+Before the weather routing, each stretch (start, your waypoints, destination) is
+checked for a straight deep-water way using NOAA depths. If the straight way crosses
+water shallower than the minimum depth, the area around it is mapped as a grid of
+depth cells and searched for the shortest deep-water path (coarse first, up to about
+150 nm either side for long passages, then refined in finer cells). Its turns are
+added as automatic course changes, and the weather corridor is laid along them, so a
+passage like Palm Beach to the Dominican Republic goes through the Providence
+Channels instead of across the Bahama Banks. If no deep-water way exists, the result
+says so.
+
 ## Vessel type
 Settings > Vessel type is Motor or Sail. For sail, legs pointing closer to the wind
 than a set angle (default 45°), once the wind reaches a set speed (default 8 kt), are

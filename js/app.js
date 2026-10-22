@@ -1,5 +1,5 @@
 import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet } from './router.js';
-import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, COASTAL_NM } from './depth.js';
+import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, deepWaterPath, COASTAL_NM } from './depth.js';
 import { providers } from './providers.js';
 import { formatLatLon, distanceNm } from './geo.js';
 import { findHavens, SEARCH_NM } from './havens.js';
@@ -373,7 +373,8 @@ $('btnPlan').onclick = async () => {
   $('btnPlan').disabled = true;
   try {
     progress('Laying out candidate waypoints…');
-    const { grid, forecast } = await getForecast(provider);
+    const deep = await routeStops(provider);
+    const { grid, forecast } = await getForecast(provider, deep.via);
     const { times } = forecast;
     if (departT < times[0] || departT > times[times.length - 1]) {
       return showError(
@@ -441,14 +442,45 @@ $('btnPlan').onclick = async () => {
 
 // The forecast for a start/destination pair is reused for 30 minutes, so
 // trying other departure times doesn't download it again.
-async function getForecast(provider) {
-  const key = JSON.stringify([state.start, activeVia(), state.dest, provider.id]);
+async function getForecast(provider, via = activeVia()) {
+  const key = JSON.stringify([state.start, via, state.dest, provider.id]);
   const c = state.cache;
   if (c && c.key === key && Date.now() - c.at < 30 * 60 * 1000) return c;
-  const grid = buildGrid(state.start, state.dest, { via: activeVia() });
+  const grid = buildGrid(state.start, state.dest, { via });
   const forecast = await provider.getForecast(grid.nodes, progress, { apiKey: settings.openMeteoKey });
   state.cache = { key, at: Date.now(), grid, forecast };
   return state.cache;
+}
+
+// The captain's waypoints, plus turns that take each stretch around water
+// shallower than the minimum depth where the straight way is blocked.
+// blocked: stretches with no deep-water way through at all.
+async function routeStops(provider) {
+  const user = activeVia();
+  const source = provider.id === 'demo' ? demoDepth : noaaDepth;
+  const min = Number(settings.minDepthFt);
+  const key = JSON.stringify([state.start, user, state.dest, min, source.name]);
+  if (state.deep?.key === key) return state.deep;
+  const pts = [state.start, ...user, state.dest];
+  const via = [];
+  let turns = 0;
+  let blocked = 0;
+  let failed = null;
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (i) via.push(user[i - 1]);
+    try {
+      const t = await deepWaterPath(pts[i], pts[i + 1], min, source, progress);
+      if (t === null) blocked++;
+      else {
+        via.push(...t.map((p) => ({ ...p, auto: true })));
+        turns += t.length;
+      }
+    } catch (e) {
+      failed = e.message; // the depth checks later will say depth wasn't checked
+    }
+  }
+  state.deep = { key, via, turns, blocked, failed };
+  return state.deep;
 }
 
 // Depth results are kept with the forecast, so re-planning only checks new legs.
@@ -559,7 +591,7 @@ const deg3 = (d) => String(Math.round(d) % 360).padStart(3, '0') + '°';
 
 // Course changes are WP1, WP2…; the captain's own waypoints keep their number.
 function pointLabel(node, i, last) {
-  if (node.via) return `Your waypoint ${node.via}`;
+  if (node.via && !node.auto) return `Your waypoint ${node.via}`;
   return i === 0 ? 'Start' : last ? 'Destination' : `WP${i}`;
 }
 
@@ -620,7 +652,9 @@ function depthSourceNote(route) {
 
 function renderRoute(route, direct, source, directShallow = false) {
   let cmp = '';
-  if (directShallow) {
+  if (state.deep?.turns) {
+    cmp = `<p class="note">Water shallower than your ${settings.minDepthFt} ft minimum blocks the direct way, so the route was laid out around it through deep water (${state.deep.turns} turn${state.deep.turns === 1 ? '' : 's'} added).</p>`;
+  } else if (directShallow) {
     cmp = `<p class="note">The direct line crosses water shallower than your ${settings.minDepthFt} ft minimum, so this route goes around it.</p>`;
   } else if (!direct.ok && direct.reason === 'seas') {
     const w = direct.worst;
@@ -731,7 +765,9 @@ function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
       : `the passage takes about ${fmtDur(quietOnly.underwayHrs)} underway and can't be finished before your no-cruise hours start at ${settings.quietStart}${activeVia().length ? '' : '. Leave earlier, or add your own waypoints where you can anchor; the route will stop there overnight and go on the next morning'}`
     : hit.length
     ? `every candidate path runs into ${hit.join(' or ')} beyond your limits`
-    : st.shallow
+    : state.deep?.blocked
+      ? `there is no way through water at least ${settings.minDepthFt} ft deep within reach of the route, even going well around the shallows. Lower the minimum depth in Settings if your boat can take it, or move the start or destination`
+      : st.shallow
       ? `every candidate path crosses water shallower than your ${settings.minDepthFt} ft minimum`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'

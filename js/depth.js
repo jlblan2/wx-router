@@ -187,7 +187,8 @@ export class DepthChecker {
       return true;
     });
     if (!todo.length) return 0;
-    const skip = (a, b, len, along) => (a.fixed && along < ENDS_NM) || (b.fixed && len - along < ENDS_NM);
+    // Turns added to get around shallows are checked right up to the turn.
+    const skip = (a, b, len, along) => (a.fixed && !a.auto && along < ENDS_NM) || (b.fixed && !b.auto && len - along < ENDS_NM);
 
     // Pass 1, main source: samples along each edge, plus probes either side of
     // it to find any land within COASTAL_NM.
@@ -315,4 +316,170 @@ export async function planWithDepth(checker, nodes, plan, onProgress = () => {},
   }
   // Out of passes: answer using only legs already confirmed deep enough.
   return { routes: plan(checker.verifiedOk), complete: false };
+}
+
+// ---------- Finding a way around shallow water ----------
+// Before the weather routing, the area around each stretch is laid out as a
+// grid of depth cells and searched (A*) for the shortest path that keeps to
+// water at least the minimum depth. Its turning points steer the weather
+// corridor around banks and shoals that a straight corridor can't get past.
+// Long passages are searched coarsely first, then each piece of the path is
+// searched again on a finer grid, so narrow passes are still found.
+const MAX_CELLS = [8000, 2500, 2500];
+const MIN_CELL_NM = 0.2;
+const REFINE_ABOVE_NM = 1; // cells bigger than this get a finer second look
+
+export async function deepWaterPath(a, b, minDepthFt, source, onProgress = () => {}, level = 0) {
+  const turns = await searchDeep(a, b, minDepthFt, source, onProgress, level);
+  if (!turns?.length || turns.cell <= REFINE_ABOVE_NM || level >= MAX_CELLS.length - 1) return turns;
+  onProgress('Refining the way around the shallows…');
+  const pts = [a, ...turns, b];
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (i) out.push(pts[i]);
+    const fine = await deepWaterPath(pts[i], pts[i + 1], minDepthFt, source, onProgress, level + 1);
+    if (fine) out.push(...fine); // no finer way: keep the coarse turn
+  }
+  return out;
+}
+
+async function searchDeep(a, b, minDepthFt, source, onProgress, level) {
+  const D = distanceNm(a, b);
+  if (D < 0.5) return [];
+  const pad = Math.min(150, Math.max(5, D * 0.3));
+  const midLat = (a.lat + b.lat) / 2;
+  const k = Math.cos((midLat * Math.PI) / 180);
+  // Plane coordinates in nm around the midpoint.
+  const toXY = (p) => [(p.lon - (a.lon + b.lon) / 2) * 60 * k, (p.lat - midLat) * 60];
+  const toLL = (x, y) => ({ lat: midLat + y / 60, lon: (a.lon + b.lon) / 2 + x / (60 * k) });
+  const [ax, ay] = toXY(a);
+  const [bx, by] = toXY(b);
+  const x0 = Math.min(ax, bx) - pad, x1 = Math.max(ax, bx) + pad;
+  const y0 = Math.min(ay, by) - pad, y1 = Math.max(ay, by) + pad;
+  const cell = Math.max(MIN_CELL_NM, Math.sqrt(((x1 - x0) * (y1 - y0)) / MAX_CELLS[level]));
+  const W = Math.ceil((x1 - x0) / cell);
+  const H = Math.ceil((y1 - y0) / cell);
+  const centre = (i, j) => toLL(x0 + (i + 0.5) * cell, y0 + (j + 0.5) * cell);
+  const pts = [];
+  for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) pts.push(centre(i, j));
+  if (!level) onProgress('Mapping deep water around the route…');
+  const depths = await source.getDepthsFt(pts);
+  const deep = depths.map((d) => d == null || d >= minDepthFt);
+  // Keep a cell's width off the shallows where there's room.
+  const margin = deep.map((v, c) => {
+    if (!v) return false;
+    const ci = c % W, cj = Math.floor(c / W);
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const i = ci + di, j = cj + dj;
+      if (i >= 0 && j >= 0 && i < W && j < H && !deep[j * W + i]) return false;
+    }
+    return true;
+  });
+  const withMargin = await search(margin);
+  return withMargin !== null ? withMargin : search(deep);
+
+  async function search(ok) {
+    ok = ok.slice();
+  const idx = (x, y) => {
+    const i = Math.min(W - 1, Math.max(0, Math.floor((x - x0) / cell)));
+    const j = Math.min(H - 1, Math.max(0, Math.floor((y - y0) / cell)));
+    return j * W + i;
+  };
+  // The start and finish are usually at a dock or in a harbour: their cells and
+  // the ones touching them count as open.
+  const sCell = idx(ax, ay);
+  const gCell = idx(bx, by);
+  for (const c of [sCell, gCell]) {
+    const ci = c % W, cj = Math.floor(c / W);
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const i = ci + di, j = cj + dj;
+      if (i >= 0 && j >= 0 && i < W && j < H) ok[j * W + i] = true;
+    }
+  }
+  // Straight line clear? Then nothing to steer around.
+  const clear = (p, q) => {
+    const n = Math.max(2, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1]) / (cell / 2)));
+    for (let s = 0; s <= n; s++) if (!ok[idx(p[0] + ((q[0] - p[0]) * s) / n, p[1] + ((q[1] - p[1]) * s) / n)]) return false;
+    return true;
+  };
+  if (clear([ax, ay], [bx, by])) return [];
+
+  // A* over the cells, 8 neighbours, no cutting corners past shallow cells.
+  const g = new Float64Array(W * H).fill(Infinity);
+  const from = new Int32Array(W * H).fill(-1);
+  const gi = gCell % W, gj = Math.floor(gCell / W);
+  const h = (c) => Math.hypot((c % W) - gi, Math.floor(c / W) - gj);
+  const open = [[h(sCell), sCell]];
+  g[sCell] = 0;
+  const push = (item) => {
+    open.push(item);
+    let n = open.length - 1;
+    while (n > 0) {
+      const p = (n - 1) >> 1;
+      if (open[p][0] <= open[n][0]) break;
+      [open[p], open[n]] = [open[n], open[p]];
+      n = p;
+    }
+  };
+  const pop = () => {
+    const top = open[0];
+    const last = open.pop();
+    if (open.length) {
+      open[0] = last;
+      let n = 0;
+      for (;;) {
+        const l = 2 * n + 1, r = l + 1;
+        let m = n;
+        if (l < open.length && open[l][0] < open[m][0]) m = l;
+        if (r < open.length && open[r][0] < open[m][0]) m = r;
+        if (m === n) break;
+        [open[m], open[n]] = [open[n], open[m]];
+        n = m;
+      }
+    }
+    return top;
+  };
+  const done = new Uint8Array(W * H);
+  while (open.length) {
+    const [, c] = pop();
+    if (done[c]) continue;
+    done[c] = 1;
+    if (c === gCell) break;
+    const ci = c % W, cj = Math.floor(c / W);
+    for (let dj = -1; dj <= 1; dj++) {
+      for (let di = -1; di <= 1; di++) {
+        if (!di && !dj) continue;
+        const i = ci + di, j = cj + dj;
+        if (i < 0 || j < 0 || i >= W || j >= H) continue;
+        const n = j * W + i;
+        if (!ok[n] || done[n]) continue;
+        if (di && dj && (!ok[cj * W + i] || !ok[j * W + ci])) continue;
+        const cost = g[c] + (di && dj ? Math.SQRT2 : 1);
+        if (cost < g[n]) {
+          g[n] = cost;
+          from[n] = c;
+          push([cost + h(n), n]);
+        }
+      }
+    }
+  }
+  if (!done[gCell]) return null; // no way through at this minimum depth
+
+  const cells = [];
+  for (let c = gCell; c !== -1; c = from[c]) cells.unshift(c);
+  const xy = cells.map((c) => [x0 + ((c % W) + 0.5) * cell, y0 + (Math.floor(c / W) + 0.5) * cell]);
+  xy[0] = [ax, ay];
+  xy[xy.length - 1] = [bx, by];
+  // Pull the path straight: keep only the turns needed to stay in deep water.
+  const turns = [];
+  let i = 0;
+  while (i < xy.length - 1) {
+    let j = xy.length - 1;
+    while (j > i + 1 && !clear(xy[i], xy[j])) j--;
+    if (j < xy.length - 1) turns.push(toLL(...xy[j]));
+    i = j;
+  }
+  turns.cell = cell;
+  return turns;
+  }
 }
