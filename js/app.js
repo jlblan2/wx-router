@@ -189,15 +189,27 @@ function drawDiagram(svg, limits, rgb) {
 }
 
 // ---------- Chart ----------
-const map = L.map('map', { zoomControl: true }).setView([26.0, -80.0], 7);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const map = L.map('map', { zoomControl: true, minZoom: 3, maxZoom: 18 }).setView([26.0, -80.0], 7);
+// Tiles stay put while zooming and keep a wider ring loaded, so zooming and
+// panning on a phone don't leave blank squares.
+const tileOpts = { updateWhenZooming: false, keepBuffer: 4 };
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  ...tileOpts,
   maxZoom: 18,
   attribution: '&copy; OpenStreetMap contributors',
 }).addTo(map);
-L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
+// OpenSeaMap's buoys, lights, rocks, wrecks and other chart symbols. Its tiles
+// start at zoom 6 and stop at 18.
+const seamarks = L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
+  ...tileOpts,
+  minZoom: 6,
   maxZoom: 18,
-  attribution: 'Seamarks &copy; OpenSeaMap',
+  attribution: 'Seamarks &copy; <a href="https://map.openseamap.org/legend.php" target="_blank" rel="noopener">OpenSeaMap</a>',
 }).addTo(map);
+L.control.layers(null, { 'Chart symbols (OpenSeaMap)': seamarks }, { position: 'bottomleft' }).addTo(map);
+// The chart shares the screen with the route sheet, and phone toolbars come and
+// go; keep Leaflet's idea of the chart size in step so tiles fill it.
+if ('ResizeObserver' in window) new ResizeObserver(() => map.invalidateSize({ pan: false })).observe($('map'));
 
 const pinIcon = (color, label) =>
   L.divIcon({
@@ -503,7 +515,7 @@ function setDepart(t) {
 }
 
 // Go/no-go timeline of departure times across the forecast, the windows when
-// the passage works, and the departure with the shortest safe route.
+// the passage works, and the departure with the quickest safe route.
 function renderWindows(scan, departT, forecast) {
   const { slots, windows, best } = scan;
   if (!slots.length) return;
@@ -613,8 +625,12 @@ function legsTable(route) {
       const stop = l.stopFrom
         ? `<tr class="stop"><td colspan="4">Overnight stop at ${pointLabel(l.from, i, false).toLowerCase()}: arrive ${fmtTime(l.stopFrom)}, leave ${fmtTime(l.t0)}</td></tr>`
         : '';
+      const sog = l.dist / l.hrs;
+      const cur = Math.abs(sog - settings.speedKt) >= 0.2
+        ? `<br><small>${sog.toFixed(1)} kt over ground (current ${sog > settings.speedKt ? '+' : '−'}${Math.abs(sog - settings.speedKt).toFixed(1)})</small>`
+        : '';
       return `${stop}<tr><td>${pointLabel(l.from, i, false)}<br><small>${formatLatLon(l.from)}</small></td>
-        <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
+        <td>${fmtTime(l.t0)}</td><td>${deg3(l.heading)}<br>${l.dist.toFixed(1)} nm${cur}${depth}</td><td>${seas}<br><small>${wind}</small></td></tr>`;
     })
     .join('');
   const last = route.legs[route.legs.length - 1];
@@ -667,12 +683,17 @@ function renderRoute(route, direct, source, directShallow = false) {
     cmp = `<p class="note">The direct line would put ${Math.round(w.windKt)} kt of wind ${SECTORS[w.wind.sector].short} (limit ${w.wind.limit} kt), so this route goes around it.</p>`;
   } else if (!direct.ok && direct.reason === 'beat') {
     cmp = `<p class="note">The direct line points too close to the wind to sail, so this route reaches across it instead.</p>`;
+  } else if (!direct.ok && direct.reason === 'current') {
+    cmp = `<p class="note">The current across the direct line is too strong to hold that course at your speed, so this route goes another way.</p>`;
   } else if (!direct.ok && direct.reason === 'land') {
     cmp = `<p class="note">The direct line crosses land or water too close to shore for the forecast, so this route goes around it.</p>`;
   } else if (direct.ok) {
     const extra = route.distanceNm - direct.distanceNm;
-    cmp = extra > 0.5
-      ? `<p class="note">This route is ${extra.toFixed(1)} nm longer than the direct line, the least extra distance that keeps within your limits.</p>`
+    const saved = (direct.underwayHrs - route.underwayHrs) * 60;
+    cmp = extra > 0.5 && saved >= 5
+      ? `<p class="note">This route is ${extra.toFixed(1)} nm longer than the direct line but ${fmtDur(saved / 60)} quicker, by making better use of the current.</p>`
+      : extra > 0.5
+      ? `<p class="note">This route is ${extra.toFixed(1)} nm longer than the direct line, the least extra that keeps within your limits.</p>`
       : `<p class="note">The direct line is within your limits.</p>`;
   }
   $('result').innerHTML = `<div class="card"><h3>Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}</h3>

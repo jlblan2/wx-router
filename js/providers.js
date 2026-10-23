@@ -3,6 +3,7 @@
 //
 //   { source, times: [unix seconds, hourly],
 //     nodes: [{ sea, waveHeight[m], waveDirection[deg from], wavePeriod[s],
+//               currentKt[kt], currentTo[deg towards] (optional),
 //               windSpeed[kt], windDirection[deg from], windGust[kt] }] }
 
 const CHUNK = 100;
@@ -140,7 +141,7 @@ export const openMeteo = {
       // cell_selection=nearest leaves wave data empty over land, which the
       // planner uses to keep the route off the beach.
       const marine = await inChunks(todo, async (chunk) => {
-        const q = `${coordParams(chunk)}&hourly=wave_height,wave_direction,wave_period&${common}`;
+        const q = `${coordParams(chunk)}&hourly=wave_height,wave_direction,wave_period,ocean_current_velocity,ocean_current_direction&${common}`;
         try {
           return await fetchJson(`${marineBase}?${q}&cell_selection=nearest`, n(chunk), onProgress);
         } catch (e) {
@@ -170,6 +171,9 @@ export const openMeteo = {
             waveHeight: m.wave_height,
             waveDirection: m.wave_direction,
             wavePeriod: m.wave_period,
+            // Currents come in km/h, heading towards.
+            currentKt: m.ocean_current_velocity?.map((v) => (v == null ? null : v / 1.852)) || null,
+            currentTo: m.ocean_current_direction || null,
             windSpeed: align(w?.wind_speed_10m),
             windDirection: align(w?.wind_direction_10m),
             windGust: align(w?.wind_gusts_10m),
@@ -206,7 +210,13 @@ export const demo = {
       const windSpeed = [];
       const windDirection = [];
       const windGust = [];
+      const currentKt = [];
+      const currentTo = [];
+      // A Gulf Stream-like current: a band flowing north-northeast at up to 3 kt.
+      const stream = Math.exp(-(((p.lon - (lon0 + 0.25)) * 60 * Math.cos((p.lat * Math.PI) / 180)) ** 2) / (2 * 12 * 12));
       times.forEach((t, h) => {
+        currentKt.push(0.2 + 2.8 * stream);
+        currentTo.push(15);
         const blobLat = lat0 + 1.2 - h * 0.02;
         const dy = (p.lat - blobLat) * 60;
         const dx = (p.lon - (lon0 + 0.15)) * 60 * Math.cos((p.lat * Math.PI) / 180);
@@ -219,7 +229,7 @@ export const demo = {
         windDirection.push(40 + 15 * Math.sin(h / 12));
         windGust.push(12 + 30 * blob);
       });
-      return { sea: true, waveHeight, waveDirection, wavePeriod, windSpeed, windDirection, windGust };
+      return { sea: true, waveHeight, waveDirection, wavePeriod, currentKt, currentTo, windSpeed, windDirection, windGust };
     });
     return { source: this.name, times, nodes };
   },

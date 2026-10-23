@@ -137,7 +137,35 @@ export function sample(forecast, k, t) {
     windKt: lerp(node.windSpeed),
     windFrom: near(node.windDirection),
     gustKt: lerp(node.windGust),
+    currentKt: lerp(node.currentKt),
+    currentTo: near(node.currentTo),
   };
+}
+
+// Mean current (as an east/north vector in kt) at the given node samples.
+function meanCurrent(samples) {
+  let e = 0, n = 0, k = 0;
+  for (const s of samples) {
+    if (!s || s.currentKt == null || s.currentTo == null) continue;
+    const r = (s.currentTo * Math.PI) / 180;
+    e += s.currentKt * Math.sin(r);
+    n += s.currentKt * Math.cos(r);
+    k++;
+  }
+  return k ? { e: e / k, n: n / k } : null;
+}
+
+// Speed over ground making good `heading` at `speedKt` through the water in a
+// current: the along-track part of the current adds or subtracts, and the boat
+// crabs to cancel the cross-track part. Null if it can't hold the course.
+export function speedOverGround(speedKt, heading, cur) {
+  if (!cur) return speedKt;
+  const r = (heading * Math.PI) / 180;
+  const along = cur.e * Math.sin(r) + cur.n * Math.cos(r);
+  const cross = cur.e * Math.cos(r) - cur.n * Math.sin(r);
+  if (Math.abs(cross) >= speedKt) return null;
+  const sog = along + Math.sqrt(speedKt * speedKt - cross * cross);
+  return sog > 0.5 ? sog : null;
 }
 
 // Check one leg a->b leaving at t0. Returns the worst sea state on the leg,
@@ -146,9 +174,14 @@ export function sample(forecast, k, t) {
 // listed in violations instead (used to explain why no route fits).
 export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
   const dist = distanceNm(a, b);
-  const hrs = dist / vessel.speedKt;
-  const t1 = t0 + hrs * 3600;
   const heading = bearingDeg(a, b);
+  // Time on the leg uses speed over ground: the current at both ends, halfway through.
+  let hrs = dist / vessel.speedKt;
+  const tm = t0 + (hrs * 3600) / 2;
+  const sog = speedOverGround(vessel.speedKt, heading, meanCurrent([sample(forecast, a.id, tm), sample(forecast, b.id, tm)]));
+  if (sog == null) return { ok: false, reason: 'current', dist, hrs, heading };
+  hrs = dist / sog;
+  const t1 = t0 + hrs * 3600;
   const checks = [];
   // Ends of the leg at the times the boat is there, plus both ends at mid-leg.
   // Start and destination may sit in a harbour with no wave data; skip those.
@@ -222,14 +255,14 @@ function runsIntoQuiet(quiet, t0, t1) {
 }
 
 // Time-dependent search over the lattice for one departure time.
-// cost = hours underway, so the answer is the shortest route that stays within
-// every limit (the speed is constant, so shortest time = shortest distance). A
-// tiny comfort term only breaks ties between equally short routes.
+// cost = hours underway, using speed over ground in the forecast current, so the
+// answer is the quickest route that stays within every limit (with no current,
+// quickest = shortest). A tiny comfort term only breaks ties.
 // With no-cruise hours set, the route is planned one stretch at a time between
 // the captain's waypoints; a stretch that can't be finished before the
 // no-cruise hours start waits at the waypoint until they end (an overnight stop).
 export function planRoute(grid, forecast, departT, vessel, opts = {}) {
-  const stats = { seas: 0, wind: 0, steep: 0, beat: 0, land: 0, beyond: 0, quiet: 0 };
+  const stats = { seas: 0, wind: 0, steep: 0, beat: 0, current: 0, land: 0, beyond: 0, quiet: 0 };
   const quiet = opts.relaxed ? null : vessel.quiet;
   const cuts = [0];
   grid.layers.forEach((l, i) => i > 0 && i < grid.layers.length - 1 && l[0].via && !l[0].auto && cuts.push(i));
@@ -363,7 +396,7 @@ function mergeLegs(legs) {
 //            past the end of the forecast, so it can't be judged yet) | 'quiet'
 //            (the weather allows it but it would mean cruising in no-cruise hours)
 //   windows: runs of consecutive 'go' hours, as { start, end } departure times
-//   best:    the 'go' departure with the shortest route, then the lowest worst-vs-limit
+//   best:    the 'go' departure with the least time underway, then the lowest worst-vs-limit
 export function scanDepartures(grid, forecast, vessel, opts = {}) {
   const step = (opts.stepHours ?? 1) * 3600;
   const first = forecast.times[0];
@@ -395,11 +428,12 @@ export function scanDepartures(grid, forecast, vessel, opts = {}) {
   for (const sl of slots) {
     if (sl.status !== 'go') continue;
     const r = sl.route;
-    // Shortest passage first; between equally short ones, the calmer.
+    // Quickest passage (time underway, currents included) first; between
+    // equally quick ones, the calmer.
     const better =
       !best ||
-      r.distanceNm < best.distanceNm - 0.1 ||
-      (Math.abs(r.distanceNm - best.distanceNm) <= 0.1 && r.maxRatio < best.maxRatio);
+      r.underwayHrs < best.underwayHrs - 0.05 ||
+      (Math.abs(r.underwayHrs - best.underwayHrs) <= 0.05 && r.maxRatio < best.maxRatio);
     if (better) best = r;
   }
   return { slots, windows, best, step };

@@ -60,12 +60,16 @@ Entering an Open-Meteo subscription key in Settings switches to Open-Meteo's
 subscriber servers (customer-api / customer-marine-api), which have no daily or
 per-minute limit, and turns pacing off.
 
-## Shortest safe route
-Every plan is the shortest route that stays within all the limits: seas and wind by
-direction, steep seas, minimum depth, the sailing angle and cruising hours. The search
-cost is time underway (equal to distance at a constant speed), with only a tiny
-comfort term to choose between equally short routes. The best departure is the one
-with the shortest safe route, then the calmest. The route is the shortest on the
+## Shortest safe route and currents
+Every plan is the quickest route that stays within all the limits: seas and wind by
+direction, steep seas, minimum depth, the sailing angle and cruising hours. Time on
+each leg uses speed over ground in the forecast ocean current (Open-Meteo marine,
+MeteoFrance SMOC model, about 8 km): the current along the course adds or subtracts,
+and the boat crabs against the current across it; a leg whose cross-current is
+stronger than the boat's speed is not used. With no current, quickest is shortest. A
+tiny comfort term only chooses between equally quick routes. The best departure is
+the one with the least time underway, then the calmest. The model current is not a
+substitute for tidal-stream data close inshore. The route is the shortest on the
 planner's grid of candidate waypoints, so it can be slightly longer than a perfectly
 drawn line.
 
