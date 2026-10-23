@@ -222,7 +222,9 @@ function runsIntoQuiet(quiet, t0, t1) {
 }
 
 // Time-dependent search over the lattice for one departure time.
-// cost = hours underway + comfort penalty for running close to the limits.
+// cost = hours underway, so the answer is the shortest route that stays within
+// every limit (the speed is constant, so shortest time = shortest distance). A
+// tiny comfort term only breaks ties between equally short routes.
 // With no-cruise hours set, the route is planned one stretch at a time between
 // the captain's waypoints; a stretch that can't be finished before the
 // no-cruise hours start waits at the waypoint until they end (an overnight stop).
@@ -253,7 +255,7 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
   // Sailing vessels need wider zig-zags to tack upwind.
   const maxJump = opts.maxJump ?? (vessel.sail ? 4 : 2);
   const edgeOk = opts.edgeOk || (() => true); // e.g. depth: false for edges known to be too shallow
-  const comfort = opts.comfortWeight ?? 0.6;
+  const comfort = opts.comfortWeight ?? 0.001;
   const relaxed = !!opts.relaxed;
   const labels = new Map();
   labels.set(layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
@@ -361,7 +363,7 @@ function mergeLegs(legs) {
 //            past the end of the forecast, so it can't be judged yet) | 'quiet'
 //            (the weather allows it but it would mean cruising in no-cruise hours)
 //   windows: runs of consecutive 'go' hours, as { start, end } departure times
-//   best:    the 'go' departure with the lowest worst-vs-limit, then the shortest passage
+//   best:    the 'go' departure with the shortest route, then the lowest worst-vs-limit
 export function scanDepartures(grid, forecast, vessel, opts = {}) {
   const step = (opts.stepHours ?? 1) * 3600;
   const first = forecast.times[0];
@@ -393,10 +395,11 @@ export function scanDepartures(grid, forecast, vessel, opts = {}) {
   for (const sl of slots) {
     if (sl.status !== 'go') continue;
     const r = sl.route;
+    // Shortest passage first; between equally short ones, the calmer.
     const better =
       !best ||
-      r.maxRatio < best.maxRatio - 0.02 ||
-      (Math.abs(r.maxRatio - best.maxRatio) <= 0.02 && r.arriveT - r.departT < best.arriveT - best.departT);
+      r.distanceNm < best.distanceNm - 0.1 ||
+      (Math.abs(r.distanceNm - best.distanceNm) <= 0.1 && r.maxRatio < best.maxRatio);
     if (better) best = r;
   }
   return { slots, windows, best, step };

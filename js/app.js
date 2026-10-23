@@ -503,7 +503,7 @@ function setDepart(t) {
 }
 
 // Go/no-go timeline of departure times across the forecast, the windows when
-// the passage works, and the most comfortable departure.
+// the passage works, and the departure with the shortest safe route.
 function renderWindows(scan, departT, forecast) {
   const { slots, windows, best } = scan;
   if (!slots.length) return;
@@ -672,7 +672,7 @@ function renderRoute(route, direct, source, directShallow = false) {
   } else if (direct.ok) {
     const extra = route.distanceNm - direct.distanceNm;
     cmp = extra > 0.5
-      ? `<p class="note">The direct line is within limits too, but this route adds ${extra.toFixed(1)} nm for a more comfortable ride (worst ${Math.round(direct.maxRatio * 100)}% of limit on the direct line).</p>`
+      ? `<p class="note">This route is ${extra.toFixed(1)} nm longer than the direct line, the least extra distance that keeps within your limits.</p>`
       : `<p class="note">The direct line is within your limits.</p>`;
   }
   $('result').innerHTML = `<div class="card"><h3>Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}</h3>

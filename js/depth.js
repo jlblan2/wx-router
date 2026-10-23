@@ -364,19 +364,9 @@ async function searchDeep(a, b, minDepthFt, source, onProgress, level) {
   for (let j = 0; j < H; j++) for (let i = 0; i < W; i++) pts.push(centre(i, j));
   if (!level) onProgress('Mapping deep water around the route…');
   const depths = await source.getDepthsFt(pts);
-  const deep = depths.map((d) => d == null || d >= minDepthFt);
-  // Keep a cell's width off the shallows where there's room.
-  const margin = deep.map((v, c) => {
-    if (!v) return false;
-    const ci = c % W, cj = Math.floor(c / W);
-    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
-      const i = ci + di, j = cj + dj;
-      if (i >= 0 && j >= 0 && i < W && j < H && !deep[j * W + i]) return false;
-    }
-    return true;
-  });
-  const withMargin = await search(margin);
-  return withMargin !== null ? withMargin : search(deep);
+  // The minimum depth is the safety margin; the path keeps to it and no more,
+  // so it is the shortest way through (the legs are checked more finely later).
+  return search(depths.map((d) => d == null || d >= minDepthFt));
 
   async function search(ok) {
     ok = ok.slice();

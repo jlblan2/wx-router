@@ -60,6 +60,15 @@ Entering an Open-Meteo subscription key in Settings switches to Open-Meteo's
 subscriber servers (customer-api / customer-marine-api), which have no daily or
 per-minute limit, and turns pacing off.
 
+## Shortest safe route
+Every plan is the shortest route that stays within all the limits: seas and wind by
+direction, steep seas, minimum depth, the sailing angle and cruising hours. The search
+cost is time underway (equal to distance at a constant speed), with only a tiny
+comfort term to choose between equally short routes. The best departure is the one
+with the shortest safe route, then the calmest. The route is the shortest on the
+planner's grid of candidate waypoints, so it can be slightly longer than a perfectly
+drawn line.
+
 ## Going around shallow water
 Before the weather routing, each stretch (start, your waypoints, destination) is
 checked for a straight deep-water way using NOAA depths. If the straight way crosses
