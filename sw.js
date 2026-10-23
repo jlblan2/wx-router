@@ -1,9 +1,9 @@
 // App shell cache so Wx Router opens without a connection. Forecasts and
 // chart tiles always come from the network.
-const CACHE = 'wxrouter-v19';
+const CACHE = 'wxrouter-v20';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/router.js', 'js/providers.js', 'js/geo.js', 'js/depth.js', 'js/havens.js', 'js/landcheck.js',
+  'js/app.js', 'js/router.js', 'js/providers.js', 'js/geo.js', 'js/depth.js', 'js/havens.js', 'js/landcheck.js', 'js/coast.js',
   'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];

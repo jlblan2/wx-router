@@ -489,7 +489,7 @@ async function routeStops(provider) {
       const avoid = [];
       let t;
       for (let round = 0; round < 10; round++) {
-        t = await deepWaterPath(pts[i], pts[i + 1], min, source, progress, 0, avoid);
+        t = await deepWaterPath(pts[i], pts[i + 1], min, source, progress, 0, avoid, provider.id === 'demo' ? null : landCheck());
         if (!t || provider.id === 'demo') break;
         const legs = [pts[i], ...t, pts[i + 1]];
         const hits = [];
@@ -694,10 +694,17 @@ function depthSourceNote(route) {
   let text = `Depths: ${dc.source.name}`;
   if (coastal) text += `; within ${COASTAL_NM} nm of shore, ${dc.coastal.name}, checked every 100 yards`;
   if (dc.coastalError) text += `. High-resolution coastal depths could not be loaded (${escapeHtml(dc.coastalError)}), so the standard depths were used near shore`;
-  if (dc.landChecked && !dc.landError) text += `. Legs near land were also checked against the OpenStreetMap coastline and bridges${settings.airDraftFt ? ` (air draft ${settings.airDraftFt} ft)` : ''}`;
-  const warn = dc.landError
-    ? `<p class="note bad-text"><strong>The coastline and bridge check couldn't run</strong> (${escapeHtml(dc.landError)}), so narrow land and bridges may not be caught. Check the route on a chart.</p>`
-    : '';
+  const air = settings.airDraftFt ? ` (air draft ${settings.airDraftFt} ft)` : '';
+  if (dc.landChecked && !dc.builtinError) {
+    text += `. Every leg was checked against the built-in coastline (GSHHG)`;
+    text += dc.landError ? '' : ` and, near land, OpenStreetMap's coastline and bridges${air}`;
+  }
+  let warn = '';
+  if (dc.builtinError) {
+    warn = `<p class="note bad-text"><strong>The built-in coastline couldn't be loaded</strong> (${escapeHtml(dc.builtinError)})${dc.landError ? ' and OpenStreetMap couldn\'t be reached either' : ''}, so narrow land may not be caught. Check the route on a chart.</p>`;
+  } else if (dc.landError) {
+    warn = `<p class="note bad-text"><strong>Bridges couldn't be checked</strong>: OpenStreetMap didn't answer (${escapeHtml(dc.landError)}). Land was still checked against the built-in coastline, but check any bridge on the route against your air draft.</p>`;
+  }
   return `<p class="note">${text}.</p>${warn}`;
 }
 

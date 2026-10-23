@@ -263,27 +263,24 @@ export class DepthChecker {
       }
       pl.samples.forEach((s, i) => s.idx >= 0 && !replaced.has(i) && take(all[s.idx]));
       this.shallowest.set(edgeKey(a, b), min ?? null);
-      pl.nearLand = pl.samples.some((s) => this.land.near(s.p, COASTAL_NM));
     });
 
-    // Pass 3: legs near land are checked against the mapped coastline and
-    // bridges, which catches land narrower than the depth samples' spacing.
+    // Pass 3: every leg is checked against the coastline and bridges, which
+    // catches land narrower than the depth samples' spacing.
     if (this.landCheck) {
-      const near = todo.filter((e, k) => plans[k].nearLand && (this.shallowest.get(edgeKey(...e)) ?? 1) > 0);
-      try {
-        await this.landCheck.prefetch(near);
-        this.landChecked = (this.landChecked || 0) + near.length;
-        for (const [a, b] of near) {
-          const end = (n) => (n.fixed && !n.auto ? ENDS_NM : 0);
-          const hit = await this.landCheck.blocking(a, b, { skipStart: end(a), skipEnd: end(b) });
-          if (hit) {
-            this.shallowest.set(edgeKey(a, b), 0);
-            this.blockedBy.set(edgeKey(a, b), hit);
-          }
+      const open = todo.filter((e) => (this.shallowest.get(edgeKey(...e)) ?? 1) > 0);
+      await this.landCheck.prefetch(open);
+      this.landChecked = (this.landChecked || 0) + open.length;
+      for (const [a, b] of open) {
+        const end = (n) => (n.fixed && !n.auto ? ENDS_NM : 0);
+        const hit = await this.landCheck.blocking(a, b, { skipStart: end(a), skipEnd: end(b) });
+        if (hit) {
+          this.shallowest.set(edgeKey(a, b), 0);
+          this.blockedBy.set(edgeKey(a, b), hit);
         }
-      } catch (e) {
-        this.landError = e.message;
       }
+      this.landError = this.landCheck.error;
+      this.builtinError = this.landCheck.coastError;
     }
     return todo.length;
   }
@@ -358,29 +355,47 @@ const REFINE_ABOVE_NM = 1; // cells bigger than this get a finer second look
 
 // blocked: points the path must not pass through (where a straight leg was
 // found to cross land or a low bridge), each closing the cells around it.
-export async function deepWaterPath(a, b, minDepthFt, source, onProgress = () => {}, level = 0, blocked = []) {
-  const turns = await searchDeep(a, b, minDepthFt, source, onProgress, level, blocked);
+// land: optional LandCheck; the path never crosses its built-in coastline.
+export async function deepWaterPath(a, b, minDepthFt, source, onProgress = () => {}, level = 0, blocked = [], land = null) {
+  const turns = await searchDeep(a, b, minDepthFt, source, onProgress, level, blocked, land);
   if (!turns?.length || turns.cell <= REFINE_ABOVE_NM || level >= MAX_CELLS.length - 1) return turns;
   onProgress('Refining the way around the shallows…');
   const pts = [a, ...turns, b];
   const out = [];
   for (let i = 0; i < pts.length - 1; i++) {
     if (i) out.push(pts[i]);
-    const fine = await deepWaterPath(pts[i], pts[i + 1], minDepthFt, source, onProgress, level + 1, blocked);
+    const fine = await deepWaterPath(pts[i], pts[i + 1], minDepthFt, source, onProgress, level + 1, blocked, land);
     if (fine) out.push(...fine); // no finer way: keep the coarse turn
   }
   return out;
 }
 
-async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked) {
+// Whether segments p-q and r-s cross (touching counts).
+function segsCross(px, py, qx, qy, rx, ry, sx, sy) {
+  const d1 = (sx - rx) * (py - ry) - (sy - ry) * (px - rx);
+  const d2 = (sx - rx) * (qy - ry) - (sy - ry) * (qx - rx);
+  const d3 = (qx - px) * (ry - py) - (qy - py) * (rx - px);
+  const d4 = (qx - px) * (sy - py) - (qy - py) * (sx - px);
+  return d1 * d2 <= 0 && d3 * d4 <= 0 && !(d1 === 0 && d2 === 0);
+}
+
+// wide: how many times the search area has been widened to find a way round land.
+async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked, land, wide = 0) {
   const D = distanceNm(a, b);
   if (D < 0.5) return [];
-  const pad = Math.min(150, Math.max(5, D * 0.3));
+  const pad = Math.min(150, Math.max(5, D * 0.3) * 4 ** wide);
   const midLat = (a.lat + b.lat) / 2;
   const k = Math.cos((midLat * Math.PI) / 180);
-  // Plane coordinates in nm around the midpoint.
-  const toXY = (p) => [(p.lon - (a.lon + b.lon) / 2) * 60 * k, (p.lat - midLat) * 60];
-  const toLL = (x, y) => ({ lat: midLat + y / 60, lon: (a.lon + b.lon) / 2 + x / (60 * k) });
+  // Mercator plane in nm around the midpoint, so straight lines here are the
+  // same chart lines (rhumb lines) the route is sailed and checked on.
+  const merc = (lat) => (Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)) * 180) / Math.PI;
+  const lon0 = (a.lon + b.lon) / 2;
+  const y0m = merc(midLat);
+  const toXY = (p) => [(p.lon - lon0) * 60 * k, (merc(p.lat) - y0m) * 60 * k];
+  const toLL = (x, y) => ({
+    lat: (2 * Math.atan(Math.exp(((y / (60 * k) + y0m) * Math.PI) / 180)) - Math.PI / 2) * (180 / Math.PI),
+    lon: lon0 + x / (60 * k),
+  });
   const [ax, ay] = toXY(a);
   const [bx, by] = toXY(b);
   const x0 = Math.min(ax, bx) - pad, x1 = Math.max(ax, bx) + pad;
@@ -404,9 +419,63 @@ async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked) 
       if (i >= 0 && j >= 0 && i < W && j < H) deepCells[j * W + i] = false;
     }
   }
-  return search(deepCells);
+  // Coastline segments by the cells they pass through, so a step or a straight
+  // stretch that would cross land is refused however narrow the land is.
+  // Coastline right at the start or finish (a dock, a harbour) doesn't count.
+  const coast = new Map();
+  if (land) {
+    const sw = toLL(x0, y0), ne = toLL(x1, y1);
+    const segs = await land.coastIn(sw.lat, sw.lon, ne.lat, ne.lon);
+    const near = (x, y) => Math.hypot(x - ax, y - ay) < ENDS_NM || Math.hypot(x - bx, y - by) < ENDS_NM;
+    for (const sg of segs) {
+      const [px, py] = toXY(sg.a), [qx, qy] = toXY(sg.b);
+      if (near(px, py) || near(qx, qy)) continue;
+      const seg = [px, py, qx, qy];
+      for (const c of cellsAlong(px, py, qx, qy)) {
+        if (!coast.has(c)) coast.set(c, []);
+        coast.get(c).push(seg);
+      }
+    }
+  }
+  const crossesCoast = (p, q, cs) => {
+    for (const c of cs) for (const sg of coast.get(c) || []) if (segsCross(p[0], p[1], q[0], q[1], ...sg)) return true;
+    return false;
+  };
+  // Cells a line passes through (grid traversal), as cell indexes.
+  function cellsAlong(px, py, qx, qy) {
+    const out = [];
+    let i = Math.floor((px - x0) / cell), j = Math.floor((py - y0) / cell);
+    const ie = Math.floor((qx - x0) / cell), je = Math.floor((qy - y0) / cell);
+    const dx = qx - px, dy = qy - py;
+    const si = Math.sign(dx), sj = Math.sign(dy);
+    const tdx = si ? cell / Math.abs(dx) : Infinity, tdy = sj ? cell / Math.abs(dy) : Infinity;
+    let tx = si ? ((si > 0 ? x0 + (i + 1) * cell - px : px - (x0 + i * cell)) / Math.abs(dx)) : Infinity;
+    let ty = sj ? ((sj > 0 ? y0 + (j + 1) * cell - py : py - (y0 + j * cell)) / Math.abs(dy)) : Infinity;
+    for (let n = 0; n < 4 * (W + H); n++) {
+      if (i >= 0 && j >= 0 && i < W && j < H) out.push(j * W + i);
+      if (i === ie && j === je) break;
+      if (tx < ty) {
+        tx += tdx;
+        i += si;
+      } else {
+        ty += tdy;
+        j += sj;
+      }
+    }
+    return out;
+  }
+  let turns = await search(deepCells, true);
+  if (turns === null && coast.size) {
+    // The way round the land may lie outside the area searched (the far end
+    // of a long island): look wider.
+    if (pad < 150) return searchDeep(a, b, minDepthFt, source, onProgress, level, blocked, land, wide + 1);
+    // Still none (a start up a river the coastline closes off, say): search on
+    // depth alone; the legs' own land checks still apply.
+    turns = await search(deepCells, false);
+  }
+  return turns;
 
-  async function search(ok) {
+  async function search(ok, useCoast) {
     ok = ok.slice();
   const idx = (x, y) => {
     const i = Math.min(W - 1, Math.max(0, Math.floor((x - x0) / cell)));
@@ -428,8 +497,9 @@ async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked) 
   const clear = (p, q) => {
     const n = Math.max(2, Math.ceil(Math.hypot(q[0] - p[0], q[1] - p[1]) / (cell / 2)));
     for (let s = 0; s <= n; s++) if (!ok[idx(p[0] + ((q[0] - p[0]) * s) / n, p[1] + ((q[1] - p[1]) * s) / n)]) return false;
-    return true;
+    return !useCoast || !crossesCoast(p, q, cellsAlong(p[0], p[1], q[0], q[1]));
   };
+  const mid = (c) => [x0 + ((c % W) + 0.5) * cell, y0 + (Math.floor(c / W) + 0.5) * cell];
   if (clear([ax, ay], [bx, by])) return [];
 
   // A* over the cells, 8 neighbours, no cutting corners past shallow cells.
@@ -482,6 +552,10 @@ async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked) 
         const n = j * W + i;
         if (!ok[n] || done[n]) continue;
         if (di && dj && (!ok[cj * W + i] || !ok[j * W + ci])) continue;
+        if (useCoast) {
+          const cs = di && dj ? [c, n, cj * W + i, j * W + ci] : [c, n];
+          if (cs.some((x) => coast.has(x)) && crossesCoast(mid(c), mid(n), cs)) continue;
+        }
         const cost = g[c] + (di && dj ? Math.SQRT2 : 1);
         if (cost < g[n]) {
           g[n] = cost;

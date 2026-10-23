@@ -1,9 +1,12 @@
-// Exact land and bridge check for route legs, from OpenStreetMap: the mapped
-// coastline (natural=coastline) and bridges. Depth models sample the seabed
+// Exact land and bridge check for route legs. Depth models sample the seabed
 // every so often and can step over a narrow cay or the neck of land at a
-// bridge; a leg that crosses a coastline line or a bridge it can't fit under
-// is caught here whatever its width.
+// bridge; a leg that crosses a coastline or a bridge it can't fit under is
+// caught here whatever its width. Land comes from the built-in coastline
+// (always there) and, where the built-in data shows a coast, from
+// OpenStreetMap's mapped coastline and bridges when that service answers.
+import { coastTile } from './coast.js';
 
+const OSM_RETRY_MS = 5 * 60 * 1000; // after a failure, leave the service alone this long
 const OVERPASS = 'https://overpass-api.de/api/interpreter';
 const TILE = 0.1; // degrees; data is fetched and indexed in tiles this size
 const BATCH = 40; // tiles per request
@@ -52,14 +55,80 @@ export class LandCheck {
   // airDraftFt: height of the boat above the water; '' or 0 if not known.
   constructor(airDraftFt) {
     this.airDraftFt = Number(airDraftFt) || 0;
-    this.tiles = new Map(); // tile key -> [{ a, b, kind, name, movable, clearanceFt }]
-    this.error = null;
+    this.tiles = new Map(); // tile key -> OpenStreetMap [{ a, b, kind, name, movable, clearanceFt }]
+    this.coast = new Map(); // tile key -> built-in coastline [{ a, b, kind, src }]
+    this.degs = new Map(); // 1° tile -> 'ok' (built-in data loaded) or 'none' (not covered)
+    this.error = null; // why OpenStreetMap couldn't be used, if it failed
+    this.coastError = null; // why the built-in coastline couldn't be loaded, if it failed
+    this.failedAt = 0;
+  }
+
+  // Built-in coastline for the 1° tiles holding these tile keys.
+  async loadCoast(keys) {
+    const degs = new Set();
+    for (const k of keys) {
+      const [ti, tj] = k.split(',').map(Number);
+      degs.add(`${Math.floor(ti * TILE + 1e-9)},${Math.floor(tj * TILE + 1e-9)}`);
+    }
+    for (const d of degs) {
+      if (this.degs.has(d)) continue;
+      const [i, j] = d.split(',').map(Number);
+      let segs;
+      try {
+        segs = await coastTile(i, j);
+      } catch (e) {
+        this.coastError = e.message;
+        continue; // OpenStreetMap is asked for this area instead
+      }
+      this.degs.set(d, segs ? 'ok' : 'none');
+      for (const { a, b } of segs || []) {
+        const seg = { a, b, kind: 'land', src: 'coast', name: null };
+        for (const k of tilesAlong(a, b)) {
+          if (!this.coast.has(k)) this.coast.set(k, []);
+          this.coast.get(k).push(seg);
+        }
+      }
+    }
+  }
+
+  // Whether the built-in coastline covers a tile key (loaded and inside its area).
+  covered(k) {
+    const [ti, tj] = k.split(',').map(Number);
+    return this.degs.get(`${Math.floor(ti * TILE + 1e-9)},${Math.floor(tj * TILE + 1e-9)}`) === 'ok';
+  }
+
+  // Built-in coastline segments inside a box, for steering searches.
+  async coastIn(s, w, n, e) {
+    const keys = new Set();
+    for (let i = Math.floor(s / TILE); i <= Math.floor(n / TILE); i++) {
+      for (let j = Math.floor(w / TILE); j <= Math.floor(e / TILE); j++) keys.add(keyOf(i, j));
+    }
+    await this.loadCoast(keys);
+    const out = new Set();
+    for (const k of keys) for (const seg of this.coast.get(k) || []) out.add(seg);
+    return [...out];
   }
 
   async load(keys) {
+    await this.loadCoast(keys);
+    // OpenStreetMap adds bridges and finer detail, only where there is a coast
+    // (or no built-in data). If it fails, the built-in coastline still stands.
+    if (Date.now() - this.failedAt < OSM_RETRY_MS) return;
     const num = (k) => k.split(',').map(Number);
     // Neighbouring tiles go in the same request, so each response stays small.
-    const missing = [...keys].filter((k) => !this.tiles.has(k)).sort((x, y) => num(x)[0] - num(y)[0] || num(x)[1] - num(y)[1]);
+    const missing = [...keys]
+      .filter((k) => !this.tiles.has(k) && (this.coast.has(k) || !this.covered(k)))
+      .sort((x, y) => num(x)[0] - num(y)[0] || num(x)[1] - num(y)[1]);
+    try {
+      await this.loadOsm(missing);
+      this.error = null;
+    } catch (e) {
+      this.error = e.message;
+      this.failedAt = Date.now();
+    }
+  }
+
+  async loadOsm(missing) {
     for (let i = 0; i < missing.length; i += BATCH) {
       const batch = missing.slice(i, i + BATCH);
       const cells = batch.map((k) => k.split(',').map(Number));
@@ -84,11 +153,12 @@ export class LandCheck {
         const t = w.tags || {};
         const coast = t.natural === 'coastline';
         const info = coast ? {} : bridgeInfo(t);
-        const item = { kind: coast ? 'land' : 'bridge', name: t.name || t['seamark:name'] || null, ...info };
+        const item = { kind: coast ? 'land' : 'bridge', src: 'osm', name: t.name || t['seamark:name'] || null, ...info };
         for (let n = 0; n < g.length - 1; n++) {
           const a = { lat: g[n].lat, lon: g[n].lon };
           const b = { lat: g[n + 1].lat, lon: g[n + 1].lon };
-          for (const k of tilesAlong(a, b)) this.tiles.get(k)?.push({ ...item, a, b });
+          const seg = { ...item, a, b }; // one object, so a crossing counts once
+          for (const k of tilesAlong(a, b)) this.tiles.get(k)?.push(seg);
         }
       }
     }
@@ -123,14 +193,14 @@ export class LandCheck {
     const seen = new Set();
     const out = [];
     for (const k of keys) {
-      for (const seg of this.tiles.get(k) || []) {
+      for (const seg of [...(this.coast.get(k) || []), ...(this.tiles.get(k) || [])]) {
         if (seen.has(seg)) continue;
         seen.add(seg);
         const t = crossAt(p, q, seg.a, seg.b);
         if (t == null) continue;
         if (t * lenNm < skipStart || (1 - t) * lenNm < skipEnd) continue;
         if (this.passes(seg)) continue;
-        out.push({ t, kind: seg.kind, name: seg.name, clearanceFt: seg.clearanceFt, at: { lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t } });
+        out.push({ t, kind: seg.kind, src: seg.src, name: seg.name, clearanceFt: seg.clearanceFt, at: { lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t } });
       }
     }
     return out.sort((x, y) => x.t - y.t);
@@ -138,17 +208,20 @@ export class LandCheck {
 
   // Points along p-q that lie on land or under a low bridge: every crossing,
   // plus points every ~0.1 nm between a coastline crossing and the next one
-  // (the stretch over land, when p starts in water).
+  // (the stretch over land, when p starts in water). Each source's crossings
+  // are paired on their own, since the two trace the same shore.
   async blockedPoints(p, q, opts) {
     const cs = await this.crossings(p, q, opts);
     const pts = cs.map((c) => c.at);
-    const land = cs.filter((c) => c.kind === 'land');
     const lenNm = Math.hypot(q.lat - p.lat, (q.lon - p.lon) * Math.cos((p.lat * Math.PI) / 180)) * 60;
-    for (let i = 0; i + 1 < land.length; i += 2) {
-      const n = Math.min(400, Math.ceil(((land[i + 1].t - land[i].t) * lenNm) / 0.1));
-      for (let s = 1; s < n; s++) {
-        const t = land[i].t + ((land[i + 1].t - land[i].t) * s) / n;
-        pts.push({ lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t });
+    for (const src of ['coast', 'osm']) {
+      const land = cs.filter((c) => c.kind === 'land' && c.src === src);
+      for (let i = 0; i + 1 < land.length; i += 2) {
+        const n = Math.min(400, Math.ceil(((land[i + 1].t - land[i].t) * lenNm) / 0.1));
+        for (let s = 1; s < n; s++) {
+          const t = land[i].t + ((land[i + 1].t - land[i].t) * s) / n;
+          pts.push({ lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t });
+        }
       }
     }
     return pts;

@@ -86,14 +86,24 @@ says so.
 
 ## Land and bridges
 Depth data is sampled every so often, so very narrow land (a thin cay, the neck of
-land at Glass Window on Eleuthera) can slip between samples. Every leg near land is
-therefore also tested against the OpenStreetMap coastline and bridges (via the
-Overpass API): a leg that crosses the coastline is blocked whatever the land's width,
-and a leg that passes under a fixed bridge is blocked unless the bridge's charted
-clearance is at least 1 ft more than the air draft set in Settings (opening bridges
-are allowed). The deep-water path around shallows is checked the same way, and
-re-searched around any crossing. Routes are rhumb lines (constant course), so the
-line that is drawn, exported and steered is the line that was checked.
+land at Glass Window on Eleuthera) can slip between samples. Every leg is therefore
+also tested against a built-in coastline: GSHHG full resolution (about 100 m detail)
+for 8°N to 45°N, 98°W to 59°W, which ships with the app in `data/coast/` as 1° tiles
+and is loaded as needed, so the check never depends on an online service. A leg that
+crosses the coastline is blocked whatever the land's width, and the deep-water path
+around shallows is searched so it never crosses it (the search widens until it finds
+the way round the end of a long island).
+
+Where there is coast, legs are also tested against the OpenStreetMap coastline and
+bridges (via the Overpass API) when that service answers: a leg that passes under a
+fixed bridge is blocked unless the bridge's charted clearance is at least 1 ft more
+than the air draft set in Settings (opening bridges are allowed). If the service
+doesn't answer, the route says bridges couldn't be checked. Routes are rhumb lines
+(constant course), so the line that is drawn, exported and steered is the line that
+was checked.
+
+The built-in coastline is from GSHHG 2.3.7 (Wessel and Smith), released under the
+GNU LGPL; `data/coast/index.json` lists its tiles.
 
 ## Vessel type
 Settings > Vessel type is Motor or Sail. For sail, legs pointing closer to the wind
