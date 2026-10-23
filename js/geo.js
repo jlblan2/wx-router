@@ -1,23 +1,28 @@
-// Great-circle helpers. Distances in nautical miles, angles in degrees true.
+// Navigation helpers. Distances in nautical miles, angles in degrees true.
 const R_NM = 3440.065;
 const rad = (d) => (d * Math.PI) / 180;
 const deg = (r) => (r * 180) / Math.PI;
 
+// Routes are rhumb lines: a constant compass course, which is what the boat
+// steers and what the chart (Mercator) draws as a straight line, so depth
+// samples, the drawn route and the course all follow the same track.
+const merc = (latDeg) => Math.log(Math.tan(Math.PI / 4 + rad(latDeg) / 2));
+const dLonRad = (a, b) => {
+  let d = rad(b.lon - a.lon);
+  if (Math.abs(d) > Math.PI) d = d > 0 ? d - 2 * Math.PI : d + 2 * Math.PI;
+  return d;
+};
+
 export function distanceNm(a, b) {
-  const dLat = rad(b.lat - a.lat);
-  const dLon = rad(b.lon - a.lon);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R_NM * Math.asin(Math.min(1, Math.sqrt(h)));
+  const dPhi = rad(b.lat - a.lat);
+  const dPsi = merc(b.lat) - merc(a.lat);
+  const q = Math.abs(dPsi) > 1e-12 ? dPhi / dPsi : Math.cos(rad(a.lat));
+  return Math.hypot(dPhi, q * dLonRad(a, b)) * R_NM;
 }
 
 export function bearingDeg(a, b) {
-  const y = Math.sin(rad(b.lon - a.lon)) * Math.cos(rad(b.lat));
-  const x =
-    Math.cos(rad(a.lat)) * Math.sin(rad(b.lat)) -
-    Math.sin(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.cos(rad(b.lon - a.lon));
-  return (deg(Math.atan2(y, x)) + 360) % 360;
+  const dPsi = merc(b.lat) - merc(a.lat);
+  return (deg(Math.atan2(dLonRad(a, b), dPsi)) + 360) % 360;
 }
 
 export function destinationPoint(p, bearing, distNm) {
@@ -37,9 +42,13 @@ export function destinationPoint(p, bearing, distNm) {
   return { lat: deg(lat2), lon: ((deg(lon2) + 540) % 360) - 180 };
 }
 
-// Point a fraction f of the way along the great circle from a to b.
+// Point a fraction f of the way along the rhumb line from a to b.
 export function interpolate(a, b, f) {
-  return destinationPoint(a, bearingDeg(a, b), distanceNm(a, b) * f);
+  const lat = a.lat + (b.lat - a.lat) * f;
+  const dl = deg(dLonRad(a, b));
+  const dPsi = merc(b.lat) - merc(a.lat);
+  const g = Math.abs(dPsi) > 1e-12 ? (merc(lat) - merc(a.lat)) / dPsi : f;
+  return { lat, lon: ((a.lon + dl * g + 540) % 360) - 180 };
 }
 
 export function formatLatLon(p) {

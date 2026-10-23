@@ -369,13 +369,26 @@ function summarize(legs, departT) {
   return { ok: true, legs: mergeLegs(legs), distanceNm: distance, departT, arriveT, maxRatio, violations, underwayHrs, stops };
 }
 
+// How far p lies from the rhumb line a-b (a straight line on the chart).
+function offTrackNm(a, b, p) {
+  const m = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+  const k = 3440.065 * Math.cos((p.lat * Math.PI) / 180);
+  const P = (q) => [(q.lon * Math.PI) / 180, m(q.lat)];
+  const [ax, ay] = P(a), [bx, by] = P(b), [px, py] = P(p);
+  const dx = bx - ax, dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1e-12;
+  return (Math.abs((px - ax) * dy - (py - ay) * dx) / len) * k;
+}
+
 // Join consecutive legs that hold the same heading so the waypoint list reads
 // like a passage plan rather than a lattice walk.
 function mergeLegs(legs) {
   const out = [];
   for (const l of legs) {
     const prev = out[out.length - 1];
-    if (prev && !prev.to.via && Math.abs(relativeAngle(prev.heading, l.heading)) < 2) {
+    // Only when the joined leg still passes within 0.05 nm of the point being
+    // dropped, so the drawn and exported leg is the track that was checked.
+    if (prev && !prev.to.via && Math.abs(relativeAngle(prev.heading, l.heading)) < 2 && offTrackNm(prev.from, l.to, prev.to) < 0.05) {
       prev.edges.push([l.from, l.to]);
       prev.to = l.to;
       prev.dist += l.dist;
