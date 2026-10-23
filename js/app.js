@@ -3,6 +3,7 @@ import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, de
 import { providers } from './providers.js';
 import { formatLatLon, distanceNm } from './geo.js';
 import { findHavens, SEARCH_NM } from './havens.js';
+import { LandCheck } from './landcheck.js';
 
 const $ = (id) => document.getElementById(id);
 const STORE = 'wxrouter.settings.v1';
@@ -10,6 +11,7 @@ const STORE = 'wxrouter.settings.v1';
 const DEFAULTS = {
   name: '',
   vesselType: 'motor',
+  airDraftFt: '',
   noGoDeg: 45,
   noGoWindKt: 8,
   lengthFt: '',
@@ -91,7 +93,7 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'vesselType', 'noGoDeg', 'noGoWindKt', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
+  for (const k of ['name', 'vesselType', 'airDraftFt', 'noGoDeg', 'noGoWindKt', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
     form.elements[k].value = settings[k];
   }
   form.elements.quietOn.checked = !!settings.quietOn;
@@ -106,6 +108,7 @@ function readForm() {
   return {
     name: form.elements.name.value.trim(),
     vesselType: form.elements.vesselType.value,
+    airDraftFt: num('airDraftFt'),
     noGoDeg: num('noGoDeg'),
     noGoWindKt: num('noGoWindKt'),
     lengthFt: num('lengthFt'),
@@ -471,7 +474,7 @@ async function routeStops(provider) {
   const user = activeVia();
   const source = provider.id === 'demo' ? demoDepth : noaaDepth;
   const min = Number(settings.minDepthFt);
-  const key = JSON.stringify([state.start, user, state.dest, min, source.name]);
+  const key = JSON.stringify([state.start, user, state.dest, min, source.name, settings.airDraftFt]);
   if (state.deep?.key === key) return state.deep;
   const pts = [state.start, ...user, state.dest];
   const via = [];
@@ -481,7 +484,27 @@ async function routeStops(provider) {
   for (let i = 0; i < pts.length - 1; i++) {
     if (i) via.push(user[i - 1]);
     try {
-      const t = await deepWaterPath(pts[i], pts[i + 1], min, source, progress);
+      // Keep the deep-water path off land and low bridges too: any leg of it
+      // that crosses one closes that spot and the search is run again.
+      const avoid = [];
+      let t;
+      for (let round = 0; round < 10; round++) {
+        t = await deepWaterPath(pts[i], pts[i + 1], min, source, progress, 0, avoid);
+        if (!t || provider.id === 'demo') break;
+        const legs = [pts[i], ...t, pts[i + 1]];
+        const hits = [];
+        try {
+          progress('Checking the way around for land and bridges…');
+          await landCheck().prefetch(legs.slice(1).map((q, k) => [legs[k], q]));
+          for (let k = 0; k < legs.length - 1; k++) {
+            hits.push(...(await landCheck().blockedPoints(legs[k], legs[k + 1], { skipStart: k === 0 ? 0.25 : 0, skipEnd: k === legs.length - 2 ? 0.25 : 0 })));
+          }
+        } catch {
+          break; // the leg-by-leg checks later report it
+        }
+        if (!hits.length) break;
+        avoid.push(...hits);
+      }
       if (t === null) blocked++;
       else {
         via.push(...t.map((p) => ({ ...p, auto: true })));
@@ -495,6 +518,13 @@ async function routeStops(provider) {
   return state.deep;
 }
 
+// Coastline and bridge data, kept while the air draft stays the same.
+function landCheck() {
+  const air = Number(settings.airDraftFt) || 0;
+  if (!state.landCheck || state.landCheck.airDraftFt !== air) state.landCheck = new LandCheck(air);
+  return state.landCheck;
+}
+
 // Depth results are kept with the forecast, so re-planning only checks new legs.
 function getDepthChecker(provider) {
   const demo = provider.id === 'demo';
@@ -502,8 +532,9 @@ function getDepthChecker(provider) {
   const coastal = demo ? demoDepth : noaaCoastalDepth;
   const min = Number(settings.minDepthFt);
   const c = state.depthChecker;
-  if (!c || c.cacheKey !== state.cache.key || c.minDepthFt !== min || c.source !== source) {
+  if (!c || c.cacheKey !== state.cache.key || c.minDepthFt !== min || c.source !== source || (!demo && c.landCheck !== landCheck())) {
     state.depthChecker = Object.assign(new DepthChecker(source, min, coastal), { cacheKey: state.cache.key });
+    state.depthChecker.landCheck = demo ? null : landCheck();
   }
   return state.depthChecker;
 }
@@ -663,7 +694,11 @@ function depthSourceNote(route) {
   let text = `Depths: ${dc.source.name}`;
   if (coastal) text += `; within ${COASTAL_NM} nm of shore, ${dc.coastal.name}, checked every 100 yards`;
   if (dc.coastalError) text += `. High-resolution coastal depths could not be loaded (${escapeHtml(dc.coastalError)}), so the standard depths were used near shore`;
-  return `<p class="note">${text}.</p>`;
+  if (dc.landChecked && !dc.landError) text += `. Legs near land were also checked against the OpenStreetMap coastline and bridges${settings.airDraftFt ? ` (air draft ${settings.airDraftFt} ft)` : ''}`;
+  const warn = dc.landError
+    ? `<p class="note bad-text"><strong>The coastline and bridge check couldn't run</strong> (${escapeHtml(dc.landError)}), so narrow land and bridges may not be caught. Check the route on a chart.</p>`
+    : '';
+  return `<p class="note">${text}.</p>${warn}`;
 }
 
 function renderRoute(route, direct, source, directShallow = false) {
@@ -712,6 +747,7 @@ async function leastBadRoute(grid, forecast, departT, vessel) {
     relaxed: true,
     edgeOk: dc ? dc.edgeOk : () => true,
     edgeDepth: dc ? dc.edgeDepth : undefined,
+    edgeBlock: dc ? dc.edgeBlock : undefined,
     minDepthFt: Number(settings.minDepthFt),
   };
   let least = planRoute(grid, forecast, departT, vessel, opts);
@@ -736,7 +772,7 @@ function explainViolations(least) {
       if (v.over > g.over) Object.assign(g, v, { count: g.count });
     }
   }
-  const order = { depth: 0, steep: 1, seas: 2, wind: 3, beat: 4 };
+  const order = { land: 0, bridge: 0, depth: 0, steep: 1, seas: 2, wind: 3, beat: 4 };
   const where = (v) => (v.at ? ` near ${formatLatLon(v.at)}` : '');
   const when = (v) => (v.kind === 'depth' ? '' : `, ${fmtTime(v.t)}`);
   const items = [...groups.values()]
@@ -747,6 +783,12 @@ function explainViolations(least) {
       }
       if (v.kind === 'wind') {
         return `<li><strong>Wind ${SECTORS[v.sector].short}:</strong> ${Math.round(v.value)} kt against your ${v.limit} kt limit, <strong>${Math.round(v.value - v.limit)} kt over</strong>${where(v)}${when(v)}.</li>`;
+      }
+      if (v.kind === 'land') {
+        return `<li><strong>Land:</strong> the only way through crosses ${v.name ? escapeHtml(v.name) : 'land'}${where(v)}.</li>`;
+      }
+      if (v.kind === 'bridge') {
+        return `<li><strong>Bridge:</strong> passes under ${v.name ? escapeHtml(v.name) : 'a fixed bridge'}${v.clearanceFt != null ? ` (${Math.round(v.clearanceFt)} ft clearance)` : ' (clearance not charted)'}${settings.airDraftFt ? `, too low for your ${settings.airDraftFt} ft air draft` : '; set your air draft in Settings'}${where(v)}.</li>`;
       }
       if (v.kind === 'beat') {
         return `<li><strong>Too close to the wind to sail:</strong> heading ${Math.round(v.value)}° off a ${Math.round(v.windKt)} kt wind, inside your ${v.limit}° limit${where(v)}${when(v)}.</li>`;
@@ -768,7 +810,7 @@ function drawProblems(least) {
   state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
   for (const v of least.violations) {
     if (!v.at) continue;
-    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind' }[v.kind];
+    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind', land: 'Land', bridge: 'Low bridge' }[v.kind];
     state.layers.push(
       L.circleMarker([v.at.lat, v.at.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#c0392b', fillOpacity: 0.9 })
         .bindTooltip(label)
@@ -1119,6 +1161,7 @@ function buildReport() {
       <tr><td>Length</td><td>${v(s.lengthFt, 'ft')}</td></tr>
       <tr><td>Freeboard</td><td>${v(s.freeboardFt, 'ft')}</td></tr>
       <tr><td>Draft</td><td>${v(s.draftFt, 'ft')}</td></tr>
+      <tr><td>Air draft</td><td>${v(s.airDraftFt, 'ft')}</td></tr>
       <tr><td>Minimum water depth</td><td>${v(s.minDepthFt, 'ft')}</td></tr>
       <tr><td>Cruise speed</td><td>${v(s.speedKt, 'kt')}</td></tr>
       <tr><td>Steep, short seas</td><td>avoid waves over ${s.steepHsFt} ft at ${s.steepPeriodS} s or less</td></tr>

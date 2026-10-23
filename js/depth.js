@@ -126,6 +126,9 @@ export class DepthChecker {
     this.land = new LandIndex();
     this.coastalEdges = new Set(); // edge keys checked with the coastal source
     this.coastalError = null; // why the coastal source couldn't be used, if it failed
+    this.landCheck = null; // optional LandCheck: exact coastline and bridge crossings
+    this.landError = null;
+    this.blockedBy = new Map(); // edge key -> { kind: 'land' | 'bridge', name, at }
   }
 
   // Coastal depths for the points, or null if the source failed (then the
@@ -260,7 +263,28 @@ export class DepthChecker {
       }
       pl.samples.forEach((s, i) => s.idx >= 0 && !replaced.has(i) && take(all[s.idx]));
       this.shallowest.set(edgeKey(a, b), min ?? null);
+      pl.nearLand = pl.samples.some((s) => this.land.near(s.p, COASTAL_NM));
     });
+
+    // Pass 3: legs near land are checked against the mapped coastline and
+    // bridges, which catches land narrower than the depth samples' spacing.
+    if (this.landCheck) {
+      const near = todo.filter((e, k) => plans[k].nearLand && (this.shallowest.get(edgeKey(...e)) ?? 1) > 0);
+      try {
+        await this.landCheck.prefetch(near);
+        this.landChecked = (this.landChecked || 0) + near.length;
+        for (const [a, b] of near) {
+          const end = (n) => (n.fixed && !n.auto ? ENDS_NM : 0);
+          const hit = await this.landCheck.blocking(a, b, { skipStart: end(a), skipEnd: end(b) });
+          if (hit) {
+            this.shallowest.set(edgeKey(a, b), 0);
+            this.blockedBy.set(edgeKey(a, b), hit);
+          }
+        }
+      } catch (e) {
+        this.landError = e.message;
+      }
+    }
     return todo.length;
   }
 
@@ -273,6 +297,9 @@ export class DepthChecker {
       n.sheltered = !n.sea && d != null && d >= this.minDepthFt;
     });
   }
+
+  // Land or a bridge blocking an edge, for explaining a block.
+  edgeBlock = (a, b) => this.blockedBy.get(edgeKey(a, b));
 
   // Shallowest known depth on an edge or at its ends, for explaining a block.
   edgeDepth = (a, b) => {
@@ -329,21 +356,23 @@ const MAX_CELLS = [8000, 2500, 2500];
 const MIN_CELL_NM = 0.2;
 const REFINE_ABOVE_NM = 1; // cells bigger than this get a finer second look
 
-export async function deepWaterPath(a, b, minDepthFt, source, onProgress = () => {}, level = 0) {
-  const turns = await searchDeep(a, b, minDepthFt, source, onProgress, level);
+// blocked: points the path must not pass through (where a straight leg was
+// found to cross land or a low bridge), each closing the cells around it.
+export async function deepWaterPath(a, b, minDepthFt, source, onProgress = () => {}, level = 0, blocked = []) {
+  const turns = await searchDeep(a, b, minDepthFt, source, onProgress, level, blocked);
   if (!turns?.length || turns.cell <= REFINE_ABOVE_NM || level >= MAX_CELLS.length - 1) return turns;
   onProgress('Refining the way around the shallows…');
   const pts = [a, ...turns, b];
   const out = [];
   for (let i = 0; i < pts.length - 1; i++) {
     if (i) out.push(pts[i]);
-    const fine = await deepWaterPath(pts[i], pts[i + 1], minDepthFt, source, onProgress, level + 1);
+    const fine = await deepWaterPath(pts[i], pts[i + 1], minDepthFt, source, onProgress, level + 1, blocked);
     if (fine) out.push(...fine); // no finer way: keep the coarse turn
   }
   return out;
 }
 
-async function searchDeep(a, b, minDepthFt, source, onProgress, level) {
+async function searchDeep(a, b, minDepthFt, source, onProgress, level, blocked) {
   const D = distanceNm(a, b);
   if (D < 0.5) return [];
   const pad = Math.min(150, Math.max(5, D * 0.3));
@@ -366,7 +395,16 @@ async function searchDeep(a, b, minDepthFt, source, onProgress, level) {
   const depths = await source.getDepthsFt(pts);
   // The minimum depth is the safety margin; the path keeps to it and no more,
   // so it is the shortest way through (the legs are checked more finely later).
-  return search(depths.map((d) => d == null || d >= minDepthFt));
+  const deepCells = depths.map((d) => d == null || d >= minDepthFt);
+  for (const p of blocked) {
+    const [px, py] = toXY(p);
+    const ci = Math.floor((px - x0) / cell), cj = Math.floor((py - y0) / cell);
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const i = ci + di, j = cj + dj;
+      if (i >= 0 && j >= 0 && i < W && j < H) deepCells[j * W + i] = false;
+    }
+  }
+  return search(deepCells);
 
   async function search(ok) {
     ok = ok.slice();

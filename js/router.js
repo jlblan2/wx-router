@@ -310,7 +310,10 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
           if (!relaxed) continue;
           const depth = opts.edgeDepth?.(a, b);
           const min = opts.minDepthFt || 1;
-          shallow = { kind: 'depth', value: depth, limit: min, over: depth != null ? Math.max(0, 1 - depth / min) : 1, at: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }, t: la.t };
+          const block = opts.edgeBlock?.(a, b); // land or a low bridge, if that's why
+          shallow = block
+            ? { kind: block.kind, name: block.name, clearanceFt: block.clearanceFt, over: 1, at: block.at, t: la.t }
+            : { kind: 'depth', value: depth, limit: min, over: depth != null ? Math.max(0, 1 - depth / min) : 1, at: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }, t: la.t };
         }
         const r = evaluateLeg(forecast, a, b, la.t, vessel, relaxed);
         if (!r.ok) {
