@@ -94,6 +94,19 @@ crosses the coastline is blocked whatever the land's width, and the deep-water p
 around shallows is searched so it never crosses it (the search widens until it finds
 the way round the end of a long island).
 
+Legs also keep a set distance off the coastline (Settings > Keep off land, default
+0.5 nm), so a route doesn't clip a point or a reef edge, and so small differences
+between the coastline data and the chart don't put a leg over land. The first and
+last 2 nm at the start, destination and the captain's waypoints are exempt, so
+harbours can be reached. Long detours are searched coarsely first; any leg of the
+result that crosses land or comes too close gets a fine search of its own around
+that spot. If the only way passes closer than the margin (a narrow cut), the route
+says so and where; land itself is never crossed, not even in the "least bad" route
+shown when nothing fits the limits. If the depth service fails, legs are still
+checked against the coastline.
+
+The app's version shows in Settings and under each route.
+
 Where there is coast, legs are also tested against the OpenStreetMap coastline and
 bridges (via the Overpass API) when that service answers: a leg that passes under a
 fixed bridge is blocked unless the bridge's charted clearance is at least 1 ft more

@@ -96,6 +96,7 @@
           <label>Draft (ft)<input name="draftFt" type="number" step="0.1" min="0" inputmode="decimal"></label>
           <label>Air draft (ft)<input name="airDraftFt" type="number" step="0.5" min="0" inputmode="decimal" placeholder="mast or arch height"></label>
           <label>Minimum water depth (ft)<input name="minDepthFt" type="number" step="0.5" min="0" inputmode="decimal" required></label>
+          <label>Keep off land (nm)<input name="landMarginNm" type="number" step="0.1" min="0" inputmode="decimal"></label>
           <label>Cruise speed (kt)<input name="speedKt" type="number" step="0.1" min="1" inputmode="decimal" required></label>
         </div>
         <div id="sailOpts" class="grid2 steep" hidden>
@@ -104,6 +105,7 @@
         </div>
         <p class="note" id="sailNote" hidden>Sail: legs that would point closer to the wind than this, once there's that much wind, are avoided, so the route reaches across the wind instead of beating into it.</p>
         <p class="note">Air draft is the height from the waterline to the top of the mast or arch. Routes only pass under a fixed bridge whose charted clearance is at least 1 ft more; fixed bridges with no charted clearance are avoided.</p>
+        <p class="note">Keep off land: legs stay at least this far from the coastline, so a route doesn't clip a point, a reef edge or a cay the chart data places a little off. The first and last 2 nm at your start, destination and waypoints are exempt, so harbours can still be reached.</p>
         <p class="note">Routes stay out of water shallower than the minimum depth, using NOAA bathymetry. Those depths are measured from about high water, not chart datum, and small shoals can be missed, so leave a margin over your draft (draft plus 3 ft is a sensible start).</p>
 
         <h2>Maximum seas allowed (ft)</h2>
@@ -146,6 +148,7 @@
 
         <button type="submit" class="btn primary wide">Save settings</button>
         <p id="savedMsg" class="saved" hidden>Saved.</p>
+        <p class="note version">Wx Router version <span class="appVersion"></span></p>
       </form>
     </section>
   </main>

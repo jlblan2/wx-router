@@ -1,5 +1,5 @@
 import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet } from './router.js';
-import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, deepWaterPath, COASTAL_NM } from './depth.js';
+import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, deepWaterPath, COASTAL_NM, CLEAR_NM } from './depth.js';
 import { providers } from './providers.js';
 import { formatLatLon, distanceNm } from './geo.js';
 import { findHavens, SEARCH_NM } from './havens.js';
@@ -12,6 +12,7 @@ const DEFAULTS = {
   name: '',
   vesselType: 'motor',
   airDraftFt: '',
+  landMarginNm: 0.5,
   noGoDeg: 45,
   noGoWindKt: 8,
   lengthFt: '',
@@ -93,7 +94,7 @@ $('providerSelect').innerHTML = Object.values(providers)
   .join('');
 
 function fillForm() {
-  for (const k of ['name', 'vesselType', 'airDraftFt', 'noGoDeg', 'noGoWindKt', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
+  for (const k of ['name', 'vesselType', 'airDraftFt', 'landMarginNm', 'noGoDeg', 'noGoWindKt', 'lengthFt', 'freeboardFt', 'draftFt', 'minDepthFt', 'speedKt', 'steepHsFt', 'steepPeriodS', 'quietStart', 'quietEnd', 'provider', 'openMeteoKey']) {
     form.elements[k].value = settings[k];
   }
   form.elements.quietOn.checked = !!settings.quietOn;
@@ -109,6 +110,7 @@ function readForm() {
     name: form.elements.name.value.trim(),
     vesselType: form.elements.vesselType.value,
     airDraftFt: num('airDraftFt'),
+    landMarginNm: num('landMarginNm') === '' ? 0 : num('landMarginNm'),
     noGoDeg: num('noGoDeg'),
     noGoWindKt: num('noGoWindKt'),
     lengthFt: num('lengthFt'),
@@ -420,10 +422,16 @@ $('btnPlan').onclick = async () => {
       await checker.check(path.slice(1).map((n, i) => [path[i], n]));
       directShallow = path.slice(1).some((n, i) => !checker.edgeOk(path[i], n));
     } catch (e) {
-      // Without depths, water with no sea forecast can't be told from land.
+      // Without depths, water with no sea forecast can't be told from land,
+      // but legs are still kept off the coastline.
       forecast.nodes.forEach((n) => (n.sheltered = false));
-      plan(() => true);
       state.depthChecker = null;
+      if (provider.id === 'demo') plan(() => true);
+      else {
+        const landOnly = new DepthChecker(noDepth, 1);
+        landOnly.landCheck = landCheck();
+        await planWithDepth(landOnly, grid.nodes, plan, progress).catch(() => plan(() => true));
+      }
       depthNote = `<strong>Water depth was not checked</strong> (${escapeHtml(e.message)}). Check this route against a chart for shallow water before you go.`;
     }
     const direct = evaluateDirect(grid, forecast, departT, vessel);
@@ -474,7 +482,7 @@ async function routeStops(provider) {
   const user = activeVia();
   const source = provider.id === 'demo' ? demoDepth : noaaDepth;
   const min = Number(settings.minDepthFt);
-  const key = JSON.stringify([state.start, user, state.dest, min, source.name, settings.airDraftFt]);
+  const key = JSON.stringify([state.start, user, state.dest, min, source.name, settings.airDraftFt, settings.landMarginNm]);
   if (state.deep?.key === key) return state.deep;
   const pts = [state.start, ...user, state.dest];
   const via = [];
@@ -497,7 +505,8 @@ async function routeStops(provider) {
           progress('Checking the way around for land and bridges…');
           await landCheck().prefetch(legs.slice(1).map((q, k) => [legs[k], q]));
           for (let k = 0; k < legs.length - 1; k++) {
-            hits.push(...(await landCheck().blockedPoints(legs[k], legs[k + 1], { skipStart: k === 0 ? 0.25 : 0, skipEnd: k === legs.length - 2 ? 0.25 : 0 })));
+            const first = k === 0, last = k === legs.length - 2;
+            hits.push(...(await landCheck().blockedPoints(legs[k], legs[k + 1], { skipStart: first ? 0.25 : 0, skipEnd: last ? 0.25 : 0, clearStart: first ? CLEAR_NM : 0, clearEnd: last ? CLEAR_NM : 0 })));
           }
         } catch {
           break; // the leg-by-leg checks later report it
@@ -521,9 +530,18 @@ async function routeStops(provider) {
 // Coastline and bridge data, kept while the air draft stays the same.
 function landCheck() {
   const air = Number(settings.airDraftFt) || 0;
-  if (!state.landCheck || state.landCheck.airDraftFt !== air) state.landCheck = new LandCheck(air);
+  const margin = Number(settings.landMarginNm) || 0;
+  if (!state.landCheck || state.landCheck.airDraftFt !== air || state.landCheck.marginNm !== margin) state.landCheck = new LandCheck(air, margin);
   return state.landCheck;
 }
+
+// Shown in Settings and under each route, to tell which version is running.
+// Keep in step with the cache name in sw.js.
+const APP_VERSION = '21 (Oct 23, 2026)';
+document.querySelectorAll('.appVersion').forEach((e) => (e.textContent = APP_VERSION));
+
+// Stands in for the depth service when it fails, so the land checks still run.
+const noDepth = { name: 'none', getDepthsFt: async (pts) => pts.map(() => null) };
 
 // Depth results are kept with the forecast, so re-planning only checks new legs.
 function getDepthChecker(provider) {
@@ -696,7 +714,7 @@ function depthSourceNote(route) {
   if (dc.coastalError) text += `. High-resolution coastal depths could not be loaded (${escapeHtml(dc.coastalError)}), so the standard depths were used near shore`;
   const air = settings.airDraftFt ? ` (air draft ${settings.airDraftFt} ft)` : '';
   if (dc.landChecked && !dc.builtinError) {
-    text += `. Every leg was checked against the built-in coastline (GSHHG)`;
+    text += `. Every leg was checked against the built-in coastline (GSHHG)${settings.landMarginNm ? `, keeping ${settings.landMarginNm} nm off land` : ''}`;
     text += dc.landError ? '' : ` and, near land, OpenStreetMap's coastline and bridges${air}`;
   }
   let warn = '';
@@ -705,7 +723,7 @@ function depthSourceNote(route) {
   } else if (dc.landError) {
     warn = `<p class="note bad-text"><strong>Bridges couldn't be checked</strong>: OpenStreetMap didn't answer (${escapeHtml(dc.landError)}). Land was still checked against the built-in coastline, but check any bridge on the route against your air draft.</p>`;
   }
-  return `<p class="note">${text}.</p>${warn}`;
+  return `<p class="note">${text}. Wx Router version ${APP_VERSION}.</p>${warn}`;
 }
 
 function renderRoute(route, direct, source, directShallow = false) {
@@ -756,6 +774,7 @@ async function leastBadRoute(grid, forecast, departT, vessel) {
     edgeDepth: dc ? dc.edgeDepth : undefined,
     edgeBlock: dc ? dc.edgeBlock : undefined,
     minDepthFt: Number(settings.minDepthFt),
+    landMarginNm: Number(settings.landMarginNm) || 0,
   };
   let least = planRoute(grid, forecast, departT, vessel, opts);
   if (least.ok && dc) {
@@ -779,9 +798,9 @@ function explainViolations(least) {
       if (v.over > g.over) Object.assign(g, v, { count: g.count });
     }
   }
-  const order = { land: 0, bridge: 0, depth: 0, steep: 1, seas: 2, wind: 3, beat: 4 };
+  const order = { land: 0, bridge: 0, shore: 0, depth: 0, steep: 1, seas: 2, wind: 3, beat: 4 };
   const where = (v) => (v.at ? ` near ${formatLatLon(v.at)}` : '');
-  const when = (v) => (v.kind === 'depth' ? '' : `, ${fmtTime(v.t)}`);
+  const when = (v) => (v.kind === 'depth' || v.kind === 'shore' ? '' : `, ${fmtTime(v.t)}`);
   const items = [...groups.values()]
     .sort((a, b) => order[a.kind] - order[b.kind] || b.over - a.over)
     .map((v) => {
@@ -790,6 +809,9 @@ function explainViolations(least) {
       }
       if (v.kind === 'wind') {
         return `<li><strong>Wind ${SECTORS[v.sector].short}:</strong> ${Math.round(v.value)} kt against your ${v.limit} kt limit, <strong>${Math.round(v.value - v.limit)} kt over</strong>${where(v)}${when(v)}.</li>`;
+      }
+      if (v.kind === 'shore') {
+        return `<li><strong>Close to land:</strong> the only way through passes ${v.value < 0.05 ? 'right by' : `${v.value.toFixed(2)} nm off`} the coastline, inside your ${v.limit} nm keep-off distance${where(v)}. If you know the passage (a cut between cays, say), lower Keep off land in Settings.</li>`;
       }
       if (v.kind === 'land') {
         return `<li><strong>Land:</strong> the only way through crosses ${v.name ? escapeHtml(v.name) : 'land'}${where(v)}.</li>`;
@@ -838,7 +860,7 @@ function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
     : state.deep?.blocked
       ? `there is no way through water at least ${settings.minDepthFt} ft deep within reach of the route, even going well around the shallows. Lower the minimum depth in Settings if your boat can take it, or move the start or destination`
       : st.shallow
-      ? `every candidate path crosses water shallower than your ${settings.minDepthFt} ft minimum`
+      ? `every candidate path crosses land or water shallower than your ${settings.minDepthFt} ft minimum`
     : route.stats.beyond
       ? 'the passage runs past the end of the forecast'
       : state.depthChecker

@@ -307,12 +307,15 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
         let shallow = null;
         if (!edgeOk(a, b)) {
           stats.shallow = (stats.shallow || 0) + 1;
-          if (!relaxed) continue;
+          // Land and low bridges are never crossed, even to show the least-bad
+          // way; passing closer to land than the margin can be shown.
+          const block = opts.edgeBlock?.(a, b);
+          if (!relaxed || (block && block.kind !== 'shore')) continue;
           const depth = opts.edgeDepth?.(a, b);
           const min = opts.minDepthFt || 1;
-          const block = opts.edgeBlock?.(a, b); // land or a low bridge, if that's why
+          const margin = opts.landMarginNm || 0;
           shallow = block
-            ? { kind: block.kind, name: block.name, clearanceFt: block.clearanceFt, over: 1, at: block.at, t: la.t }
+            ? { kind: 'shore', value: block.distNm, limit: margin, over: margin ? 1 - block.distNm / margin : 1, at: block.at, t: la.t }
             : { kind: 'depth', value: depth, limit: min, over: depth != null ? Math.max(0, 1 - depth / min) : 1, at: { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 }, t: la.t };
         }
         const r = evaluateLeg(forecast, a, b, la.t, vessel, relaxed);

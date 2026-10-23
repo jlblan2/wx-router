@@ -40,6 +40,28 @@ function crossAt(p1, p2, q1, q2) {
   return t >= 0 && t <= 1 && u >= 0 && u <= 1 ? t : null;
 }
 
+// Closest approach of segment p-q to segment a-b (which don't cross): the
+// fraction along p-q and the distance in nm.
+function closestApproach(p, q, a, b) {
+  const [px, py] = P(p), [qx, qy] = P(q), [ax, ay] = P(a), [bx, by] = P(b);
+  const proj = (x, y, x1, y1, x2, y2) => {
+    const dx = x2 - x1, dy = y2 - y1;
+    const f = dx || dy ? Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy))) : 0;
+    return { f, d: Math.hypot(x1 + f * dx - x, y1 + f * dy - y) };
+  };
+  const cands = [
+    { ...proj(ax, ay, px, py, qx, qy), on: 'pq' },
+    { ...proj(bx, by, px, py, qx, qy), on: 'pq' },
+    { ...proj(px, py, ax, ay, bx, by), t: 0 },
+    { ...proj(qx, qy, ax, ay, bx, by), t: 1 },
+  ];
+  const best = cands.reduce((m, c) => (c.d < m.d ? c : m));
+  const t = best.on ? best.f : best.t;
+  // Mercator degrees to nm at that latitude.
+  const lat = p.lat + (q.lat - p.lat) * t;
+  return { t, nm: best.d * 60 * Math.cos((lat * Math.PI) / 180) };
+}
+
 function bridgeInfo(tags) {
   const num = (k) => {
     const v = parseFloat(tags[k]);
@@ -53,8 +75,10 @@ function bridgeInfo(tags) {
 
 export class LandCheck {
   // airDraftFt: height of the boat above the water; '' or 0 if not known.
-  constructor(airDraftFt) {
+  // marginNm: how far off the coastline legs must stay.
+  constructor(airDraftFt, marginNm = 0) {
     this.airDraftFt = Number(airDraftFt) || 0;
+    this.marginNm = Number(marginNm) || 0;
     this.tiles = new Map(); // tile key -> OpenStreetMap [{ a, b, kind, name, movable, clearanceFt }]
     this.coast = new Map(); // tile key -> built-in coastline [{ a, b, kind, src }]
     this.degs = new Map(); // 1° tile -> 'ok' (built-in data loaded) or 'none' (not covered)
@@ -179,30 +203,51 @@ export class LandCheck {
   }
 
   // First thing blocking the chart line p-q, as { kind, name, at, clearanceFt },
-  // or null. skipNm: ignore crossings this close to either end when that end
-  // is marked (start, destination, the captain's waypoints sit at docks).
+  // or null. kind 'shore' is a pass closer to land than the margin.
+  // skipStart/skipEnd: ignore crossings this close (nm) to either end, and
+  // clearStart/clearEnd: allow passing close to land this near either end,
+  // when that end is marked (start, destination and the captain's waypoints
+  // sit in harbours).
   async blocking(p, q, opts) {
     return (await this.crossings(p, q, opts))[0] || null;
   }
 
-  // Every blocking crossing along p-q, nearest p first.
-  async crossings(p, q, { skipStart = 0, skipEnd = 0 } = {}) {
+  // Everything blocking p-q, nearest p first.
+  async crossings(p, q, { skipStart = 0, skipEnd = 0, clearStart = 0, clearEnd = 0 } = {}) {
     const keys = tilesAlong(p, q);
     await this.load(keys);
+    const near = new Set(keys);
+    if (this.marginNm > 0) {
+      for (const k of keys) {
+        const [i, j] = k.split(',').map(Number);
+        for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) near.add(keyOf(i + di, j + dj));
+      }
+      await this.loadCoast(near);
+    }
     const lenNm = Math.hypot(q.lat - p.lat, (q.lon - p.lon) * Math.cos((p.lat * Math.PI) / 180)) * 60 || 1e-9;
+    const at = (t) => ({ lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t });
     const seen = new Set();
     const out = [];
-    for (const k of keys) {
+    let closest = null;
+    for (const k of near) {
       for (const seg of [...(this.coast.get(k) || []), ...(this.tiles.get(k) || [])]) {
         if (seen.has(seg)) continue;
         seen.add(seg);
         const t = crossAt(p, q, seg.a, seg.b);
-        if (t == null) continue;
+        if (t == null) {
+          // Not crossing: how close does the leg pass?
+          if (seg.kind !== 'land' || !this.marginNm) continue;
+          const c = closestApproach(p, q, seg.a, seg.b);
+          if (c.nm >= this.marginNm || c.t * lenNm < clearStart || (1 - c.t) * lenNm < clearEnd) continue;
+          if (!closest || c.nm < closest.distNm) closest = { t: c.t, kind: 'shore', src: seg.src, name: null, distNm: c.nm, at: at(c.t) };
+          continue;
+        }
         if (t * lenNm < skipStart || (1 - t) * lenNm < skipEnd) continue;
         if (this.passes(seg)) continue;
-        out.push({ t, kind: seg.kind, src: seg.src, name: seg.name, clearanceFt: seg.clearanceFt, at: { lat: p.lat + (q.lat - p.lat) * t, lon: p.lon + (q.lon - p.lon) * t } });
+        out.push({ t, kind: seg.kind, src: seg.src, name: seg.name, clearanceFt: seg.clearanceFt, at: at(t) });
       }
     }
+    if (closest) out.push(closest);
     return out.sort((x, y) => x.t - y.t);
   }
 
@@ -212,7 +257,7 @@ export class LandCheck {
   // are paired on their own, since the two trace the same shore.
   async blockedPoints(p, q, opts) {
     const cs = await this.crossings(p, q, opts);
-    const pts = cs.map((c) => c.at);
+    const pts = cs.map((c) => c.at); // crossings, and the closest pass to land
     const lenNm = Math.hypot(q.lat - p.lat, (q.lon - p.lon) * Math.cos((p.lat * Math.PI) / 180)) * 60;
     for (const src of ['coast', 'osm']) {
       const land = cs.filter((c) => c.kind === 'land' && c.src === src);
