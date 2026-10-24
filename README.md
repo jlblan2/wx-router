@@ -33,6 +33,23 @@ the boat inside the captain's sea-state limits.
 7. **X** (top right) exits. Phones don't let a web app close itself, so if it stays open
    a "closed" screen appears; close it the usual way (swipe up on iPhone, Back on Android).
 
+## The planning rule
+1. **Departure first.** Conditions at the departure point, at the departure time, must
+   be within the vessel's limits (seas and wind for the course it sets off on, steep
+   seas) and outside the no-cruise hours. If they aren't, no route is planned: the app
+   says what is over the limits and gives the first departure time when they aren't.
+2. **Then the shortest route.** The shortest (quickest, with currents) route to the
+   destination that stays within every limit the whole way, including conditions at
+   the destination on arrival.
+3. **Otherwise the nearest port.** If the destination can't be reached within the
+   limits, the route goes to the port nearest the destination that can be, searched
+   within 120 nm of it: harbours and marinas from OpenStreetMap's nautical data, plus a
+   built-in list of commercial ports (`data/ports.json`, from the searoute project,
+   Apache-2.0). The card says why the destination can't be reached and the earliest
+   departure that would reach it.
+
+No line is ever drawn for a path that goes over the limits.
+
 ## How the planner works (`js/router.js`)
 - Lays a lattice of candidate waypoints over a corridor either side of the direct line
   (about 30% of the distance each side).
@@ -41,7 +58,9 @@ the boat inside the captain's sea-state limits.
   and the wind never exceed the limit for the direction they hit the boat from. Among legal paths it prefers
   ones that stay further below the limits.
 - Points with no wave data (land, or too close to shore for the forecast grid) are
-  avoided. The start and destination are always allowed so marinas work.
+  avoided. The start, destination, the captain's waypoints and ports are always
+  allowed so marinas work; they are checked against the limits too, and where the
+  forecast has no seas for them (in a harbour), against the wind limits only.
 
 ## Forecast data
 `js/providers.js` holds the forecast sources behind one interface:

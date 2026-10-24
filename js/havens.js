@@ -237,3 +237,30 @@ export async function findHavens(route, opts) {
     excluded,
   };
 }
+
+// Ports (harbours and marinas) within radiusNm of a point, nearest first:
+// OpenStreetMap's nautical data when it answers, plus the commercial ports
+// that ship with the app, so there is always something to try.
+const BUILTIN_PORTS = new URL('../data/ports.json', import.meta.url);
+export async function findPorts(center, radiusNm, max = 10) {
+  const padLat = radiusNm / 60;
+  const padLon = radiusNm / (60 * Math.cos((center.lat * Math.PI) / 180));
+  const list = [];
+  let error = null;
+  try {
+    const els = await overpass([center.lat - padLat, center.lon - padLon, center.lat + padLat, center.lon + padLon]);
+    list.push(...els.map(classify).filter((h) => h && h.kind === 'port'));
+  } catch (e) {
+    error = e.message;
+  }
+  try {
+    const res = await fetch(BUILTIN_PORTS);
+    if (res.ok) for (const [name, lat, lon] of (await res.json()).ports) list.push({ id: `wpi/${name}/${lat}`, kind: 'port', name, category: 'commercial port', lat, lon });
+  } catch {}
+  const near = dedupe(list)
+    .map((h) => ({ ...h, toDest: distanceNm(center, h) }))
+    .filter((h) => h.toDest <= radiusNm)
+    .sort((a, b) => a.toDest - b.toDest)
+    .slice(0, max);
+  return { ports: near, error };
+}

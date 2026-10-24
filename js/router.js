@@ -168,6 +168,53 @@ export function speedOverGround(speedKt, heading, cur) {
   return sog > 0.5 ? sog : null;
 }
 
+// Every limit one forecast sample goes over, for a boat on `heading`, and
+// how close it comes to the limits. sail: the no-go rule, when it applies.
+function limitsAt(s, heading, vessel, sail = null) {
+  const sea = s.hsFt != null ? against(s.hsFt, s.seasFrom, heading, vessel.limitsFt) : null;
+  // Wind is checked when the source has it and the captain set wind limits.
+  const wind = s.windKt != null && vessel.windLimitsKt ? against(s.windKt, s.windFrom, heading, vessel.windLimitsKt) : null;
+  const seaRatio = sea ? sea.ratio : 0;
+  const ratio = Math.max(seaRatio, wind ? wind.ratio : 0);
+  const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > seaRatio ? 'wind' : 'seas' };
+  const found = [];
+  // Steep, short-period seas are avoided whatever direction they come from.
+  const steep = vessel.steep;
+  if (steep && sea && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
+    found.push({ kind: 'steep', value: s.hsFt, limit: steep.hsFt, periodS: s.periodS, over: s.hsFt / steep.hsFt - 1 });
+  }
+  if (sea && sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
+  if (wind && wind.ratio > 1) found.push({ kind: 'wind', value: s.windKt, limit: wind.limit, sector: wind.sector, over: wind.ratio - 1 });
+  // A sailing vessel can't hold a course this close to the wind once there's
+  // enough of it to sail; it would have to tack or motor.
+  if (sail && s.windKt != null && s.windFrom != null && s.windKt >= sail.minWindKt) {
+    const off = relativeAngle(s.windFrom, heading);
+    if (off < sail.noGoDeg) found.push({ kind: 'beat', value: off, limit: sail.noGoDeg, windKt: s.windKt, over: (sail.noGoDeg - off) / sail.noGoDeg });
+  }
+  return { info, found };
+}
+
+// The departure gate: are conditions at the start, at time t, within the
+// limits for a boat setting off on `heading`? ok is true when the forecast
+// has nothing for the spot (then the legs decide).
+export function departureCheck(forecast, start, heading, t, vessel) {
+  const s = sample(forecast, start.id, t);
+  if (!s || s.beyond) return { ok: true, unknown: true, violations: [] };
+  const { info, found } = limitsAt(s, heading, vessel);
+  return { ok: !found.length, info, violations: found.map((v) => ({ ...v, t, at: { lat: start.lat, lon: start.lon } })) };
+}
+
+// The first hour after t whose departure passes the gate (and isn't in the
+// no-cruise hours), or null within the forecast.
+export function nextDepartureOk(forecast, start, heading, t, vessel) {
+  const last = forecast.times[forecast.times.length - 1];
+  for (let u = Math.floor(t / 3600) * 3600 + 3600; u <= last; u += 3600) {
+    if (isQuiet(vessel.quiet, u)) continue;
+    if (departureCheck(forecast, start, heading, u, vessel).ok) return u;
+  }
+  return null;
+}
+
 // Check one leg a->b leaving at t0. Returns the worst sea state on the leg,
 // or an infeasible marker with the reason.
 // With relaxed set, limits don't reject the leg; every limit it goes over is
@@ -184,47 +231,26 @@ export function evaluateLeg(forecast, a, b, t0, vessel, relaxed = false) {
   const t1 = t0 + hrs * 3600;
   const checks = [];
   // Ends of the leg at the times the boat is there, plus both ends at mid-leg.
-  // Start and destination may sit in a harbour with no wave data; skip those.
-  // Your own waypoints are checked too when the forecast covers them.
-  const check = (n) => !n.fixed || (n.via && (forecast.nodes[n.id]?.sea || forecast.nodes[n.id]?.sheltered));
+  // The start, the destination, your waypoints and ports are checked too
+  // whenever the forecast covers them (in a harbour, just the wind).
+  const check = (n) => !n.fixed || forecast.nodes[n.id]?.sea || forecast.nodes[n.id]?.sheltered;
   if (check(a)) checks.push([a.id, t0]);
   if (check(a)) checks.push([a.id, (t0 + t1) / 2]);
   if (check(b)) checks.push([b.id, (t0 + t1) / 2]);
   if (check(b)) checks.push([b.id, t1]);
   let worst = null;
   const violations = [];
+  // Not on legs leaving the start or reaching the destination, which are
+  // usually motored in and out of harbour.
+  const sail = (a.fixed && !a.via) || (b.fixed && !b.via) ? null : vessel.sail;
   for (const [k, t] of checks) {
     const s = sample(forecast, k, t);
     if (!s) return { ok: false, reason: 'land', dist, hrs, heading };
     if (s.beyond) return { ok: false, reason: 'beyond', dist, hrs, heading };
-    const sea = s.hsFt != null ? against(s.hsFt, s.seasFrom, heading, vessel.limitsFt) : null;
-    // Wind is checked when the source has it and the captain set wind limits.
-    const wind =
-      s.windKt != null && vessel.windLimitsKt
-        ? against(s.windKt, s.windFrom, heading, vessel.windLimitsKt)
-        : null;
-    const seaRatio = sea ? sea.ratio : 0;
-    const ratio = Math.max(seaRatio, wind ? wind.ratio : 0);
-    const info = { ...s, sea, wind, ratio, limitedBy: wind && wind.ratio > seaRatio ? 'wind' : 'seas', t };
-    if (!worst || ratio > worst.ratio) worst = info;
+    const { info, found } = limitsAt(s, heading, vessel, sail);
+    info.t = t;
+    if (!worst || info.ratio > worst.ratio) worst = info;
     const at = forecast.nodes[k] && { lat: (k === a.id ? a : b).lat, lon: (k === a.id ? a : b).lon };
-    const found = [];
-    // Steep, short-period seas are avoided whatever direction they come from.
-    const steep = vessel.steep;
-    if (steep && sea && s.periodS != null && s.hsFt > steep.hsFt && s.periodS <= steep.periodS) {
-      found.push({ kind: 'steep', value: s.hsFt, limit: steep.hsFt, periodS: s.periodS, over: s.hsFt / steep.hsFt - 1 });
-    }
-    if (sea && sea.ratio > 1) found.push({ kind: 'seas', value: s.hsFt, limit: sea.limit, sector: sea.sector, over: sea.ratio - 1 });
-    if (wind && wind.ratio > 1) found.push({ kind: 'wind', value: s.windKt, limit: wind.limit, sector: wind.sector, over: wind.ratio - 1 });
-    // A sailing vessel can't hold a course this close to the wind once there's
-    // enough of it to sail; it would have to tack or motor.
-    // Not on legs leaving the start or reaching the destination, which are
-    // usually motored in and out of harbour.
-    const sail = (a.fixed && !a.via) || (b.fixed && !b.via) ? null : vessel.sail;
-    if (sail && s.windKt != null && s.windFrom != null && s.windKt >= sail.minWindKt) {
-      const off = relativeAngle(s.windFrom, heading);
-      if (off < sail.noGoDeg) found.push({ kind: 'beat', value: off, limit: sail.noGoDeg, windKt: s.windKt, over: (sail.noGoDeg - off) / sail.noGoDeg });
-    }
     if (found.length && !relaxed) return { ok: false, reason: found[0].kind, dist, hrs, heading, worst: info };
     for (const v of found) violations.push({ ...v, t, at });
   }
@@ -272,12 +298,17 @@ export function planRoute(grid, forecast, departT, vessel, opts = {}) {
   for (let s = 0; s < cuts.length - 1; s++) {
     const layers = grid.layers.slice(cuts[s], cuts[s + 1] + 1);
     let part = planStretch(layers, forecast, t, vessel, opts, stats, quiet);
-    if (!part && s > 0 && quietOn(quiet)) {
+    if (part.fail && s > 0 && quietOn(quiet)) {
       const morning = nextClock(t, quiet.end);
-      part = planStretch(layers, forecast, morning, vessel, opts, stats, quiet);
-      if (part) part.legs[0].stopFrom = t;
+      const again = planStretch(layers, forecast, morning, vessel, opts, stats, quiet);
+      if (!again.fail) {
+        part = again;
+        part.legs[0].stopFrom = t;
+      }
     }
-    if (!part) return { ok: false, stats };
+    // reach: everywhere the boat could get within the limits, for finding a
+    // port short of the destination.
+    if (part.fail) return { ok: false, stats, reach: { prefix: legs, labels: part.labels } };
     legs.push(...part.legs);
     t = part.t;
   }
@@ -291,7 +322,7 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
   const comfort = opts.comfortWeight ?? 0.001;
   const relaxed = !!opts.relaxed;
   const labels = new Map();
-  labels.set(layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null });
+  labels.set(layers[0][0].id, { cost: 0, t: departT, prev: null, leg: null, node: layers[0][0] });
   for (let i = 0; i < layers.length - 1; i++) {
     const next = layers[i + 1];
     for (const a of layers[i]) {
@@ -336,17 +367,49 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
         const cost = la.cost + r.hrs * (1 + comfort * ratio * ratio) + penalty;
         const lb = labels.get(b.id);
         if (!lb || cost < lb.cost) {
-          labels.set(b.id, { cost, t: r.t1, prev: a, leg: { ...r, from: a, to: b, t0: la.t } });
+          labels.set(b.id, { cost, t: r.t1, prev: a, leg: { ...r, from: a, to: b, t0: la.t }, node: b });
         }
       }
     }
   }
   const destNode = layers[layers.length - 1][0];
   const end = labels.get(destNode.id);
-  if (!end) return null;
+  if (!end) return { fail: true, labels };
+  return { legs: legsTo(labels, destNode), t: end.t };
+}
+
+// The legs of the best path found to node n.
+function legsTo(labels, n) {
   const legs = [];
-  for (let n = destNode, l = end; l.leg; n = l.prev, l = labels.get(n.id)) legs.unshift(l.leg);
-  return { legs, t: end.t };
+  for (let l = labels.get(n.id); l.leg; n = l.prev, l = labels.get(n.id)) legs.unshift(l.leg);
+  return legs;
+}
+
+// When the destination can't be reached within the limits: the port nearest
+// the destination that can be. ports: nodes ({ id, lat, lon, fixed: true,
+// name }) with forecasts in forecast.nodes, nearest the destination first.
+// The last leg runs from anywhere the boat can reach within the limits.
+const MAX_LAST_LEG_NM = 60;
+export function planToPort(grid, forecast, departT, vessel, opts, ports) {
+  const r = planRoute(grid, forecast, departT, vessel, opts);
+  if (r.ok || !r.reach) return null;
+  const { prefix, labels } = r.reach;
+  const edgeOk = opts.edgeOk || (() => true);
+  const from = [...labels.values()];
+  for (const p of ports) {
+    let best = null;
+    for (const l of from) {
+      if (distanceNm(l.node, p) > MAX_LAST_LEG_NM || !edgeOk(l.node, p)) continue;
+      const e = evaluateLeg(forecast, l.node, p, l.t, vessel);
+      if (!e.ok || runsIntoQuiet(vessel.quiet, l.t, e.t1)) continue;
+      if (!best || l.cost + e.hrs < best.cost) best = { cost: l.cost + e.hrs, l, e };
+    }
+    if (best) {
+      const legs = [...prefix, ...legsTo(labels, best.l.node), { ...best.e, from: best.l.node, to: p, t0: best.l.t }];
+      return { ...summarize(legs, departT), port: p };
+    }
+  }
+  return null;
 }
 
 // Follow the direct line (centre lane) without any routing, for comparison.

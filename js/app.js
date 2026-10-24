@@ -1,8 +1,8 @@
-import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet } from './router.js';
+import { SECTORS, buildGrid, planRoute, evaluateDirect, scanDepartures, directPath, isQuiet, departureCheck, nextDepartureOk, planToPort } from './router.js';
 import { noaaDepth, noaaCoastalDepth, demoDepth, DepthChecker, planWithDepth, deepWaterPath, COASTAL_NM, CLEAR_NM } from './depth.js';
 import { providers } from './providers.js';
-import { formatLatLon, distanceNm } from './geo.js';
-import { findHavens, SEARCH_NM } from './havens.js';
+import { formatLatLon, distanceNm, bearingDeg } from './geo.js';
+import { findHavens, findPorts, SEARCH_NM } from './havens.js';
 import { LandCheck } from './landcheck.js';
 
 const $ = (id) => document.getElementById(id);
@@ -408,7 +408,16 @@ $('btnPlan').onclick = async () => {
         `The forecast runs from ${fmtTime(times[0])} to ${fmtTime(times[times.length - 1])}. Pick a departure inside that window.`
       );
     }
-    progress('Finding the best route and checking every departure time…');
+    // 1. The departure point must be within the limits before any route is made.
+    markFixed(grid, forecast);
+    const startNode = grid.layers[0][0];
+    const heading = bearingDeg(startNode, grid.layers.slice(1).find((l) => l[0].fixed)[0]);
+    const gate = departureCheck(forecast, startNode, heading, departT, vessel);
+    if (!gate.ok || isQuiet(vessel.quiet, departT)) {
+      renderGate(gate, departT, nextDepartureOk(forecast, startNode, heading, departT, vessel), forecast);
+      return;
+    }
+    progress('Finding the shortest route within your limits…');
     await new Promise((r) => setTimeout(r, 0)); // let the message paint
     const fromT = Math.min(departT, Date.now() / 1000);
     let route, scan;
@@ -418,6 +427,7 @@ $('btnPlan').onclick = async () => {
       return [route.ok ? route : null, ...scan.slots.map((sl) => sl.route)];
     };
     const checker = getDepthChecker(provider);
+    let active = checker; // what checks legs for depth and land, if anything
     let depthNote = '';
     let directShallow = false;
     try {
@@ -426,6 +436,7 @@ $('btnPlan').onclick = async () => {
         await checker.checkNodes(grid.nodes);
       }
       checker.markSheltered(forecast);
+      markFixed(grid, forecast);
       const res = await planWithDepth(checker, grid.nodes, plan, progress);
       if (!res.complete) depthNote = 'Some legs could not be depth-checked in time and were left out, so the route may be longer than needed.';
       const path = directPath(grid);
@@ -435,31 +446,42 @@ $('btnPlan').onclick = async () => {
       // Without depths, water with no sea forecast can't be told from land,
       // but legs are still kept off the coastline.
       forecast.nodes.forEach((n) => (n.sheltered = false));
+      markFixed(grid, forecast);
       state.depthChecker = null;
+      active = null;
       if (provider.id === 'demo') plan(() => true);
       else {
-        const landOnly = new DepthChecker(noDepth, 1);
-        landOnly.landCheck = landCheck();
-        await planWithDepth(landOnly, grid.nodes, plan, progress).catch(() => plan(() => true));
+        active = new DepthChecker(noDepth, 1);
+        active.landCheck = landCheck();
+        await planWithDepth(active, grid.nodes, plan, progress).catch(() => ((active = null), plan(() => true)));
       }
       depthNote = `<strong>Water depth was not checked</strong> (${escapeHtml(e.message)}). Check this route against a chart for shallow water before you go.`;
     }
     const direct = evaluateDirect(grid, forecast, departT, vessel);
+    // 2. The shortest route within the limits to the destination; 3. failing
+    // that, to the port nearest the destination that the limits allow.
+    const later = route.ok ? null : scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
+    const st = route.stats;
+    const limited = !route.ok && (st.seas || st.wind || st.steep || st.beat || st.current);
+    const port = limited ? await routeToPort(grid, forecast, departT, vessel, provider, active).catch((e) => ({ route: null, ports: [], error: e.message })) : null;
     if (route.ok) {
       drawRoute(route);
       renderRoute(route, direct, forecast.source, directShallow);
       state.plan = { route, departT, source: forecast.source };
+    } else if (port?.route) {
+      progress('Working out which limits are in the way…');
+      const least = await leastBadRoute(grid, forecast, departT, vessel);
+      drawRoute(port.route);
+      renderRoute(port.route, null, forecast.source, false, { least, later });
+      state.plan = { route: port.route, departT, source: forecast.source };
     } else {
-      const later = scan.slots.find((sl) => sl.status === 'go' && sl.t > departT)?.route || null;
       progress('Working out which limits are in the way…');
       // Would the weather allow it if not for the no-cruise hours?
       const free = vessel.quiet && route.stats.quiet ? planRoute(grid, forecast, departT, { ...vessel, quiet: null }, { edgeOk: state.depthChecker?.edgeOk }) : null;
       const quietOnly = free?.ok ? free : null;
       const least = quietOnly ? null : await leastBadRoute(grid, forecast, departT, vessel);
-      renderNoRoute(route, later, forecast, least, quietOnly, departT);
-      if (later) drawRoute(later, true);
-      drawProblems(least);
-      state.plan = { route: later, departT, source: forecast.source, alternative: !!later };
+      renderNoRoute(route, later, forecast, least, quietOnly, departT, port);
+      state.plan = { route: null, departT, source: forecast.source };
     }
     renderWindows(scan, departT, forecast);
     recordCheck(scan);
@@ -547,8 +569,51 @@ function landCheck() {
 
 // Shown in Settings and under each route, to tell which version is running.
 // Keep in step with the cache name in sw.js.
-const APP_VERSION = '23 (Oct 24, 2026)';
+const APP_VERSION = '24 (Oct 24, 2026)';
 document.querySelectorAll('.appVersion').forEach((e) => (e.textContent = APP_VERSION));
+
+// The start, destination and waypoints are judged against the limits too.
+// Where the forecast has no seas for them (in a harbour), just the wind.
+function markFixed(grid, forecast) {
+  for (const n of grid.nodes) {
+    const f = forecast.nodes[n.id];
+    if (n.fixed && f && !f.sea) f.sheltered = !!f.windSpeed?.some((v) => v != null);
+  }
+}
+
+// The destination can't be reached within the limits: find the port nearest
+// it that can. Returns { route, ports, error } (route null if none works).
+const PORT_RADIUS_NM = 120;
+async function routeToPort(grid, forecast, departT, vessel, provider, checker) {
+  progress('Looking for the nearest port the conditions allow…');
+  const { ports: found, error } = await findPorts(state.dest, PORT_RADIUS_NM);
+  if (!found.length) return { route: null, ports: [], error };
+  const pf = await provider.getForecast(found, () => {}, { apiKey: settings.openMeteoKey });
+  const shift = Math.round((pf.times[0] - forecast.times[0]) / 3600);
+  const nodes = forecast.nodes.slice();
+  const ports = found.map((h, k) => {
+    const id = `port:${h.lat.toFixed(5)},${h.lon.toFixed(5)}`;
+    const f = alignForecast(pf.nodes[k], shift, forecast.times.length);
+    if (!f.sea) f.sheltered = !!f.windSpeed?.some((v) => v != null);
+    nodes[id] = f;
+    return { id, lat: h.lat, lon: h.lon, fixed: true, port: true, name: h.name || 'Unnamed harbour', toDest: h.toDest };
+  });
+  const fc = { ...forecast, nodes };
+  let route = null;
+  const plan = (edgeOk) => [(route = planToPort(grid, fc, departT, vessel, { edgeOk }, ports))];
+  if (checker) await planWithDepth(checker, grid.nodes, plan, progress);
+  else plan(() => true);
+  return { route, ports, error };
+}
+
+// A forecast node re-indexed to the planner's hours (shift: hours its first
+// time is after the planner's).
+function alignForecast(f, shift, len) {
+  if (!shift) return { ...f };
+  const out = {};
+  for (const [k, v] of Object.entries(f)) out[k] = Array.isArray(v) ? Array.from({ length: len }, (_, i) => v[i - shift] ?? null) : v;
+  return out;
+}
 
 // Stands in for the depth service when it fails, so the land checks still run.
 const noDepth = { name: 'none', getDepthsFt: async (pts) => pts.map(() => null) };
@@ -650,6 +715,14 @@ function drawRoute(route, dashed = false) {
       );
     }
   });
+  const end = route.legs[route.legs.length - 1].to;
+  if (end.port) {
+    state.layers.push(
+      L.circleMarker([end.lat, end.lon], { radius: 9, color: '#fff', weight: 2, fillColor: '#2e8b57', fillOpacity: 1 })
+        .bindTooltip(`${end.name}: nearest port the conditions allow`, { permanent: true, direction: 'top' })
+        .addTo(map)
+    );
+  }
   map.fitBounds(pts, { padding: [40, 40] });
 }
 
@@ -664,6 +737,7 @@ const deg3 = (d) => String(Math.round(d) % 360).padStart(3, '0') + '°';
 // Course changes are WP1, WP2…; the captain's own waypoints keep their number.
 function pointLabel(node, i, last) {
   if (node.via && !node.auto) return `Your waypoint ${node.via}`;
+  if (node.port) return node.name;
   return i === 0 ? 'Start' : last ? 'Destination' : `WP${i}`;
 }
 
@@ -737,9 +811,13 @@ function depthSourceNote(route) {
   return `<p class="note">${text}. Wx Router version ${APP_VERSION}.</p>${warn}`;
 }
 
-function renderRoute(route, direct, source, directShallow = false) {
+// toPort: { least, later } when this is the route to the nearest workable
+// port because the destination can't be reached within the limits.
+function renderRoute(route, direct, source, directShallow = false, toPort = null) {
   let cmp = '';
-  if (state.deep?.turns) {
+  if (toPort) {
+    cmp = portNote(route, toPort);
+  } else if (state.deep?.turns) {
     cmp = `<p class="note">Water shallower than your ${settings.minDepthFt} ft minimum blocks the direct way, so the route was laid out around it through deep water (${state.deep.turns} turn${state.deep.turns === 1 ? '' : 's'} added).</p>`;
   } else if (directShallow) {
     cmp = `<p class="note">The direct line crosses water shallower than your ${settings.minDepthFt} ft minimum, so this route goes around it.</p>`;
@@ -767,12 +845,36 @@ function renderRoute(route, direct, source, directShallow = false) {
       ? `<p class="note">This route is ${extra.toFixed(1)} nm longer than the direct line, the least extra that keeps within your limits.</p>`
       : `<p class="note">The direct line is within your limits.</p>`;
   }
-  $('result').innerHTML = `<div class="card"><h3>Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}</h3>
+  const title = toPort ? `Route to ${escapeHtml(route.port.name)}` : `Route${settings.name ? ' for ' + escapeHtml(settings.name) : ''}`;
+  $('result').innerHTML = `<div class="card"><h3>${title}</h3>
     ${summaryStats(route)}${cmp}${legsTable(route)}
     ${depthSourceNote(route)}
     <p class="note">Forecast: ${source}. Colours show the worst seas or wind on each leg against your limits: green under 70%, amber 70–90%, red over 90%.</p>
     <button class="btn" id="btnGpx">Export GPX</button></div>`;
   $('btnGpx').onclick = () => exportGpx(route);
+  if (toPort?.later) $('btnUseLater').onclick = () => (setDepart(toPort.later.departT), $('btnPlan').click());
+}
+
+// Why the route stops short of the destination, and where it goes instead.
+function portNote(route, { least, later }) {
+  const p = route.port;
+  const reasons = least?.ok && least.violations.length ? explainViolations(least, 'What stands in the way of reaching it:') : '';
+  return `<div class="card bad inner"><p><strong>Your destination can't be reached within your limits for this departure.</strong> ${escapeHtml(p.name)} is the nearest port to it that can be, ${p.toDest < 1 ? 'right by it' : `${p.toDest.toFixed(1)} nm from it`}.</p>${reasons}
+    ${later ? `<p>The earliest departure that reaches your destination within your limits is ${fmtTime(later.departT)}.</p><button class="btn" id="btnUseLater">Plan for that departure</button>` : '<p>No departure in the forecast reaches your destination within your limits.</p>'}</div>`;
+}
+
+// The departure point is over the limits (or it's in the no-cruise hours):
+// no route until it isn't.
+function renderGate(gate, departT, next, forecast) {
+  const why = gate.ok
+    ? `This departure time is inside your no-cruise hours (${quietText()}).`
+    : `Conditions at your departure point at ${fmtTime(departT)} are over your limits, so no route is planned until they aren't.`;
+  const detail = gate.ok ? '' : explainViolations({ violations: gate.violations }, 'At your departure point:');
+  const when = next
+    ? `<p>The first departure time when your departure point is within your limits${quietHours() ? ' and outside your no-cruise hours' : ''} is <strong>${fmtTime(next)}</strong>.</p><button class="btn primary" id="btnGateNext">Plan for that departure</button>`
+    : `<p>Your departure point isn't within your limits at any time in the forecast (to ${fmtTime(forecast.times[forecast.times.length - 1])}).</p>`;
+  $('result').innerHTML = `<div class="card bad"><h3>Not yet: wait to leave</h3><p>${why}</p>${detail}${when}</div>`;
+  if (next) $('btnGateNext').onclick = () => (setDepart(next), $('btnPlan').click());
 }
 
 // The path that goes over the limits least, so we can say which limits are in
@@ -805,7 +907,7 @@ async function leastBadRoute(grid, forecast, departT, vessel) {
 }
 
 // One line per limit gone over: the worst case, where and when.
-function explainViolations(least) {
+function explainViolations(least, lead = 'Even the closest the planner can get goes over these limits:') {
   const groups = new Map();
   for (const v of least.violations) {
     const key = v.kind + (v.sector ?? '');
@@ -847,27 +949,12 @@ function explainViolations(least) {
         ? `<li><strong>Water depth:</strong> ${Math.max(0, Math.round(v.value))} ft against your ${v.limit} ft minimum, <strong>${Math.round(v.limit - Math.max(0, v.value))} ft too shallow</strong>${where(v)}.</li>`
         : `<li><strong>Water depth:</strong> shallower than your ${v.limit} ft minimum${where(v)}.</li>`;
     });
-  return `<p>Even the best path for this departure goes over these limits:</p><ul class="violations">${items.join('')}</ul>
-    <p class="note">Red dots on the chart mark where. Changing any of these limits in Settings, or leaving at a different time, may open a route.</p>`;
+  return `<p>${lead}</p><ul class="violations">${items.join('')}</ul>`;
 }
 
-function drawProblems(least) {
-  if (!least?.ok) return;
-  if (!state.gpx) setExport(least, 'Export GPX (closest path, over your limits)');
-  const pts = least.legs.flatMap((l, i) => (i === 0 ? [l.from, l.to] : [l.to]));
-  state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
-  for (const v of least.violations) {
-    if (!v.at) continue;
-    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind', land: 'Land', bridge: 'Low bridge', shore: 'Close to land' }[v.kind];
-    state.layers.push(
-      L.circleMarker([v.at.lat, v.at.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#c0392b', fillOpacity: 0.9 })
-        .bindTooltip(label)
-        .addTo(map)
-    );
-  }
-}
 
-function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
+// port: the nearest-port search, when the limits were what stood in the way.
+function renderNoRoute(route, later, forecast, least, quietOnly, departT, port = null) {
   const st = route.stats;
   const hit = [st.seas && 'seas', st.wind && 'wind', st.steep && 'steep, short seas', st.beat && 'headings too close to the wind to sail'].filter(Boolean);
   const why = quietOnly
@@ -887,25 +974,21 @@ function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
         : 'no open-water path was found between the two points. Water depth could not be checked, so rivers and other water without a sea forecast could not be used';
   const detail = !quietOnly && least?.ok && least.violations.length ? explainViolations(least) : '';
   const alsoQuiet = !quietOnly && isQuiet(quietHours(), departT) ? ` This departure time is also inside your no-cruise hours (${quietText()}).` : '';
-  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.${alsoQuiet}</p>${detail}</div>`;
-  if (later) {
-    html += `<div class="card"><h3>Earliest workable departure: ${fmtTime(later.departT)}</h3>
-      ${summaryStats(later)}${legsTable(later)}
-      <p class="note">Shown dashed on the chart. Forecast: ${forecast.source}.</p>
-      <div class="acts"><button class="btn" id="btnUseLater">Use this departure</button>
-      <button class="btn" id="btnGpxLater">Export GPX</button></div></div>`;
-  }
+  const ports = !port
+    ? ''
+    : port.ports.length
+      ? `<p>No port within ${PORT_RADIUS_NM} nm of your destination can be reached within your limits either${port.error ? ' (only the built-in list of commercial ports could be searched, as the harbour data service didn\'t answer)' : ''}.</p>`
+      : `<p>No ports were found within ${PORT_RADIUS_NM} nm of your destination to try instead${port.error ? ` (the harbour data service didn't answer: ${escapeHtml(port.error)})` : ''}.</p>`;
+  let html = `<div class="card bad"><h3>No route within your limits</h3><p>For this departure, ${why}.${alsoQuiet}</p>${detail}${ports}`;
+  html += later
+    ? `<p>The earliest departure that reaches your destination within your limits is <strong>${fmtTime(later.departT)}</strong>.</p><button class="btn primary" id="btnUseLater">Plan for that departure</button></div>`
+    : '</div>';
   $('result').innerHTML = html;
-  if (detail) {
-    $('result').querySelector('.card.bad').insertAdjacentHTML('beforeend', '<button class="btn" id="btnGpxLeast">Export this path as GPX</button>');
-    $('btnGpxLeast').onclick = () => exportGpx(least);
-  }
   if (later) {
     $('btnUseLater').onclick = () => {
       setDepart(later.departT);
       $('btnPlan').click();
     };
-    $('btnGpxLater').onclick = () => exportGpx(later);
   }
 }
 
