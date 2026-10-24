@@ -356,7 +356,17 @@ function clearRoute() {
   state.plan = null;
   state.lastScan = null;
   $('result').innerHTML = '';
+  setExport(null);
 }
+
+// The Export GPX button under Plan route exports whatever line is on the chart:
+// the route, the earliest workable departure, or the closest path.
+function setExport(route, label = 'Export GPX') {
+  state.gpx = route;
+  $('btnExport').disabled = !route;
+  $('btnExport').textContent = route ? label : 'Export GPX (plan a route first)';
+}
+$('btnExport').onclick = () => state.gpx && exportGpx(state.gpx);
 function showError(msg) {
   $('result').innerHTML = `<div class="card bad">${msg}</div>`;
 }
@@ -537,7 +547,7 @@ function landCheck() {
 
 // Shown in Settings and under each route, to tell which version is running.
 // Keep in step with the cache name in sw.js.
-const APP_VERSION = '22 (Oct 24, 2026)';
+const APP_VERSION = '23 (Oct 24, 2026)';
 document.querySelectorAll('.appVersion').forEach((e) => (e.textContent = APP_VERSION));
 
 // Stands in for the depth service when it fails, so the land checks still run.
@@ -619,6 +629,7 @@ function renderWindows(scan, departT, forecast) {
 const ratioColor = (r) => (r < 0.7 ? '#2e8b57' : r < 0.9 ? '#d08a00' : '#c0392b');
 
 function drawRoute(route, dashed = false) {
+  setExport(route, dashed ? 'Export GPX (earliest workable departure)' : 'Export GPX');
   const pts = [];
   route.legs.forEach((l, i) => {
     if (i === 0) pts.push([l.from.lat, l.from.lon]);
@@ -842,6 +853,7 @@ function explainViolations(least) {
 
 function drawProblems(least) {
   if (!least?.ok) return;
+  if (!state.gpx) setExport(least, 'Export GPX (closest path, over your limits)');
   const pts = least.legs.flatMap((l, i) => (i === 0 ? [l.from, l.to] : [l.to]));
   state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
   for (const v of least.violations) {
