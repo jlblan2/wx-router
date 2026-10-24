@@ -312,6 +312,8 @@ function planStretch(layers, forecast, departT, vessel, opts, stats, quiet) {
           const block = opts.edgeBlock?.(a, b);
           if (!relaxed || (block && block.kind !== 'shore')) continue;
           const depth = opts.edgeDepth?.(a, b);
+          // Depth data showing dry land (0 ft or less) counts as land too.
+          if (!block && depth != null && depth <= 0) continue;
           const min = opts.minDepthFt || 1;
           const margin = opts.landMarginNm || 0;
           shallow = block

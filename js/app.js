@@ -537,7 +537,7 @@ function landCheck() {
 
 // Shown in Settings and under each route, to tell which version is running.
 // Keep in step with the cache name in sw.js.
-const APP_VERSION = '21 (Oct 23, 2026)';
+const APP_VERSION = '22 (Oct 24, 2026)';
 document.querySelectorAll('.appVersion').forEach((e) => (e.textContent = APP_VERSION));
 
 // Stands in for the depth service when it fails, so the land checks still run.
@@ -777,13 +777,20 @@ async function leastBadRoute(grid, forecast, departT, vessel) {
     landMarginNm: Number(settings.landMarginNm) || 0,
   };
   let least = planRoute(grid, forecast, departT, vessel, opts);
-  if (least.ok && dc) {
+  // Make sure the depth and land along this path are known before showing it:
+  // check its legs and plan again until it only uses checked legs.
+  for (let round = 0; least.ok && dc && round < 8; round++) {
+    let added;
     try {
-      // Make sure the depth along this path is known before describing it.
-      if (await dc.check(least.legs.flatMap((l) => l.edges))) least = planRoute(grid, forecast, departT, vessel, opts);
-    } catch {}
+      added = await dc.check(least.legs.flatMap((l) => l.edges));
+    } catch {
+      return { ok: false, legs: [], violations: [], stats: least.stats };
+    }
+    if (!added) return least;
+    least = planRoute(grid, forecast, departT, vessel, opts);
   }
-  return least;
+  // Still finding unchecked legs: show no path rather than an unchecked one.
+  return dc && least.ok ? { ok: false, legs: [], violations: [], stats: least.stats } : least;
 }
 
 // One line per limit gone over: the worst case, where and when.
@@ -839,7 +846,7 @@ function drawProblems(least) {
   state.layers.push(L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#c0392b', weight: 2, opacity: 0.6, dashArray: '2 6' }).addTo(map));
   for (const v of least.violations) {
     if (!v.at) continue;
-    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind', land: 'Land', bridge: 'Low bridge' }[v.kind];
+    const label = { seas: 'Seas over limit', wind: 'Wind over limit', steep: 'Steep, short seas', depth: 'Too shallow', beat: 'Too close to the wind', land: 'Land', bridge: 'Low bridge', shore: 'Close to land' }[v.kind];
     state.layers.push(
       L.circleMarker([v.at.lat, v.at.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#c0392b', fillOpacity: 0.9 })
         .bindTooltip(label)
@@ -873,14 +880,20 @@ function renderNoRoute(route, later, forecast, least, quietOnly, departT) {
     html += `<div class="card"><h3>Earliest workable departure: ${fmtTime(later.departT)}</h3>
       ${summaryStats(later)}${legsTable(later)}
       <p class="note">Shown dashed on the chart. Forecast: ${forecast.source}.</p>
-      <button class="btn" id="btnUseLater">Use this departure</button></div>`;
+      <div class="acts"><button class="btn" id="btnUseLater">Use this departure</button>
+      <button class="btn" id="btnGpxLater">Export GPX</button></div></div>`;
   }
   $('result').innerHTML = html;
+  if (detail) {
+    $('result').querySelector('.card.bad').insertAdjacentHTML('beforeend', '<button class="btn" id="btnGpxLeast">Export this path as GPX</button>');
+    $('btnGpxLeast').onclick = () => exportGpx(least);
+  }
   if (later) {
     $('btnUseLater').onclick = () => {
       setDepart(later.departT);
       $('btnPlan').click();
     };
+    $('btnGpxLater').onclick = () => exportGpx(later);
   }
 }
 
