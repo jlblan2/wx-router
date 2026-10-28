@@ -569,7 +569,7 @@ function landCheck() {
 
 // Shown in Settings and under each route, to tell which version is running.
 // Keep in step with the cache name in sw.js.
-const APP_VERSION = '24 (Oct 24, 2026)';
+const APP_VERSION = '25 (Oct 28, 2026)';
 document.querySelectorAll('.appVersion').forEach((e) => (e.textContent = APP_VERSION));
 
 // The start, destination and waypoints are judged against the limits too.

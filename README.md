@@ -197,3 +197,16 @@ better or worse.
 Any static web host over HTTPS works (GitHub Pages, Netlify, Cloudflare Pages). Serve
 this folder as-is, open it on the phone and use "Add to Home Screen".
 Locally: `python3 -m http.server` in this folder, then open http://localhost:8000.
+
+## Disclaimer
+
+The app shows this on first use and must be accepted before it can be used (it can be read again from Settings):
+
+> This software is provided "as is", without warranty of any kind, express or implied,
+> including any warranty of accuracy, reliability or fitness for a particular purpose.
+> N. Tesla, Inc. and the developer assume no responsibility or liability to the user of
+> this application, or to anyone else, for its use, or for any loss, damage, injury or
+> death arising from its use, from the information it provides, or from being unable to
+> use it. The user is responsible for using due diligence: checking all information
+> against official sources, charts, forecasts and equipment, and using sound judgment.
+> The user assumes all risk of using this application.
