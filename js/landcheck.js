@@ -179,6 +179,8 @@ export class LandCheck {
         const info = coast ? {} : bridgeInfo(t);
         const item = { kind: coast ? 'land' : 'bridge', src: 'osm', name: t.name || t['seamark:name'] || null, ...info };
         for (let n = 0; n < g.length - 1; n++) {
+          // out geom(clip) leaves null for points outside the clip box
+          if (!g[n] || !g[n + 1]) continue;
           const a = { lat: g[n].lat, lon: g[n].lon };
           const b = { lat: g[n + 1].lat, lon: g[n + 1].lon };
           const seg = { ...item, a, b }; // one object, so a crossing counts once
