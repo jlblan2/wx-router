@@ -63,6 +63,7 @@ main { flex: 1; min-height: 0; position: relative; }
 .btn.on { border-color: var(--sea); background: var(--sea); color: #fff; }
 .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; font-weight: 600; }
 .btn.wide { width: 100%; padding: 11px; font-size: 16px; margin-top: 4px; }
+a.btn { display: block; text-align: center; text-decoration: none; box-sizing: border-box; }
 .btn:disabled { opacity: .6; }
 input, select {
   font: inherit; color: var(--text); background: var(--bg);

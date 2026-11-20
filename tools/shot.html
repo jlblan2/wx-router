@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!-- Screenshot helper for tools/make_guide.py: shows one screen of Wx Router with sample
+     settings and a sample passage (Port Everglades to Bimini) so headless Edge can photograph
+     it. Serve the project folder over http (modules and coastline files don't load from
+     file://) and open tools/shot.html?scene=route. tools/shoot.py photographs every scene. -->
+<html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>html,body{margin:0;height:100%;background:#0b3d5c}iframe{border:0;width:390px;height:800px;display:block}</style>
+</head><body>
+<script>
+const scene = new URLSearchParams(location.search).get('scene') || 'route';
+localStorage.clear();
+localStorage.setItem('disclaimer.Wx Router.v1', 'accepted');
+const SAMPLE = {
+  name: 'Sea Breeze', vesselType: 'motor', lengthFt: 34, freeboardFt: 4, draftFt: 3.5, airDraftFt: 14,
+  minDepthFt: 7, landMarginNm: 0.5, speedKt: 18, noGoDeg: 45, noGoWindKt: 8,
+  limitsFt: [4, 4.5, 5, 5, 4, 5, 5, 4.5], windLimitsKt: [20, 22, 25, 25, 25, 25, 25, 22],
+  steepHsFt: 6, steepPeriodS: 6, quietOn: false, quietStart: '18:00', quietEnd: '08:00',
+  provider: 'open-meteo', openMeteoKey: '', minDepthSet: true,
+};
+const settings = { ...SAMPLE };
+if (scene === 'gate') settings.windLimitsKt = settings.windLimitsKt.map(() => 3);   // limits nothing meets
+if (scene === 'sail') Object.assign(settings, { vesselType: 'sail', name: 'Windward', speedKt: 6 });
+if (scene !== 'first') localStorage.setItem('wxrouter.settings.v1', JSON.stringify(settings));
+
+const START = { lat: 26.0905, lon: -80.1080 };   // Port Everglades
+const DEST = { lat: 25.7268, lon: -79.2965 };    // Alice Town, North Bimini
+const VIA = [{ lat: 25.95, lon: -79.75 }, { lat: 25.80, lon: -79.45 }];
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// The app keeps its Leaflet map to itself; load its page with a hook after leaflet.js that
+// remembers the map, so points can be placed on the chart.
+const f = document.createElement('iframe');
+fetch('../index.html').then((r) => r.text()).then((html) => {
+  f.srcdoc = html
+    .replace('<head>', '<head><base href="../">')
+    .replace('<script src="vendor/leaflet/leaflet.js"><\/script>',
+      '<script src="vendor/leaflet/leaflet.js"><\/script><script>L.Map.addInitHook(function () { window.__wxMap = this; });<\/script>');
+  document.body.appendChild(f);
+});
+
+f.onload = async () => {
+  const w = f.contentWindow, d = f.contentDocument;
+  const $ = (id) => d.getElementById(id);
+  for (let i = 0; i < 100 && !w.L; i++) await wait(100);
+  await wait(800);
+  const show = (el, block) => (typeof el === 'string' ? $(el) : el).scrollIntoView({ block: block || 'start' });
+  // A tap on the chart at a point, as the app sees it.
+  const clickAt = (pt) => w.__wxMap.fire('click', { latlng: w.L.latLng(pt.lat, pt.lon) });
+  const done = async (max = 900) => {
+    // wait for the plan to finish: Plan route enabled again and something in the result
+    for (let i = 0; i < max * 2; i++) {
+      await wait(500);
+      if (!$('btnPlan').disabled && $('result').textContent.trim()) return true;
+    }
+    return false;
+  };
+  const havensDone = async () => {
+    for (let i = 0; i < 1200 && $('havensMsg'); i++) await wait(500);
+  };
+  async function setRoute(via = []) {
+    $('btnPickStart').click(); clickAt(START);
+    $('btnPickDest').click(); clickAt(DEST);
+    if (via.length) {
+      $('btnViaYes').click();
+      for (const p of via) clickAt(p);
+      $('btnPickVia').click();   // Done
+    }
+    await wait(300);
+  }
+  async function plan() {
+    $('btnPlan').click();
+    await done();
+    // If this hour doesn't work, plan the departure the app suggests, so the picture shows a route.
+    for (const id of ['btnGateNext', 'btnUseLater']) if ($(id) && scene !== 'gate') { $(id).click(); await done(); }
+  }
+
+  if (scene === 'first' || scene === 'settings') {
+    show(d.querySelector('#settingsView h2'));
+  } else if (scene === 'settings-limits') {
+    $('tabSettings').click();
+    await wait(200);
+    show($('seaDiagram').closest('.limits').previousElementSibling.previousElementSibling);
+  } else if (scene === 'settings-more') {
+    $('tabSettings').click();
+    d.querySelector('[name=quietOn]').click();
+    await wait(200);
+    show(Array.from(d.querySelectorAll('#settingsView h2')).find((h) => /Steep/.test(h.textContent)));
+  } else if (scene === 'sail') {
+    $('tabSettings').click();
+    await wait(200);
+    show(d.querySelector('#settingsView h2'));
+  } else if (scene === 'route-setup') {
+    await setRoute();
+    show(d.querySelector('.sheet'), 'end');
+    d.querySelector('main').scrollTop = 0;
+  } else if (scene === 'waypoints') {
+    await setRoute(VIA);
+    show($('viaPanel'), 'center');
+  } else if (scene === 'gate') {
+    await setRoute();
+    await plan();
+    show('result');
+  } else {
+    await setRoute(scene === 'legs' ? VIA : []);
+    await plan();
+    const card = (re) => Array.from(d.querySelectorAll('#result h3')).find((h) => re.test(h.textContent));
+    if (scene === 'route') show(card(/^Route/));
+    else if (scene === 'legs') show(d.querySelector('#result table.legs'));
+    else if (scene === 'windows') show(card(/When can you go/));
+    else if (scene === 'havens') { await havensDone(); show('havensCard'); }
+    else if (scene === 'saved') {
+      w.prompt = () => 'Bimini run';
+      $('btnSave').click();
+      await wait(300);
+      show('savedBox');
+    }
+  }
+  await wait(1500);
+  document.title = 'ready';
+};
+</script>
+</body></html>
